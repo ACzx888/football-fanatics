@@ -6,7 +6,7 @@ Dark, modern sports desk for Hong Kong Jockey Club (HKJC) football fixtures — 
 
 ## Features
 
-- **HKJC schedule** — live matches via `hkjc-api` (GraphQL). Date filters are unreliable upstream, so we fetch open matches and filter to today/tomorrow in HKT. Odds pools are **not** fetched for prediction.
+- **HKJC schedule** — live matches via native Workers-safe GraphQL fetch to HKJC. Date filters are unreliable upstream, so we fetch open matches and filter to today/tomorrow in HKT. Odds pools are **not** used for prediction (empty `fbOddsTypes`).
 - **Predictions (fundamental-only / no odds)** — HAD, total corners, home/away team corners from historic results, recent form (W/D/L), goals for/against, home/away splits, attack/defence rates, tempo, and in-play score/corner rate projection. Missing fundamentals show **Insufficient Data** — never a fallback to odds.
 - **In-play** — `INPLAY` badge, estimated minute, Expected vs Actual corner panels; corner expectations tilt from the live corner rate when available.
 - **Fallback** — if live HKJC fails, labeled demo fixtures + error banner.
@@ -15,7 +15,7 @@ Dark, modern sports desk for Hong Kong Jockey Club (HKJC) football fixtures — 
 
 - Next.js App Router + TypeScript + Tailwind CSS v4
 - Server API route `/api/matches` (avoids CORS)
-- `hkjc-api` for HKJC GraphQL (schedule + live scores/corners + historic `matchResult`)
+- Native `fetch` GraphQL client (`src/lib/hkjc-graphql.ts`) for schedule + live scores/corners + historic `matchResult`
 - Deployed via **[@opennextjs/cloudflare](https://opennext.js.org/cloudflare)** to Cloudflare Workers (Workers Assets / Pages-compatible Git deploy)
 
 ## Run locally

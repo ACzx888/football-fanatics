@@ -1,6 +1,9 @@
-import { FootballAPI } from "hkjc-api";
 import { buildDemoMatches } from "./demo-data";
-import { getHistoricBundle, getTeamForm } from "./historic";
+import { getHistoricBundleSoft, getTeamForm } from "./historic";
+import {
+  fetchLiveFootballMatches,
+  type RawLiveMatch,
+} from "./hkjc-graphql";
 import { buildPredictions } from "./predictions";
 import type { FootballMatch, MatchesApiResponse } from "./types";
 import {
@@ -11,30 +14,12 @@ import {
   isInPlayStatus,
 } from "./time";
 
-type RawMatch = {
-  id?: string;
-  frontEndId?: string;
-  kickOffTime?: string;
-  matchDate?: string;
-  status?: string;
-  homeTeam?: { id?: string; name_en?: string; name_ch?: string };
-  awayTeam?: { id?: string; name_en?: string; name_ch?: string };
-  tournament?: { name_en?: string; code?: string };
-  runningResult?: {
-    homeScore?: number;
-    awayScore?: number;
-    corner?: number;
-    homeCorner?: number;
-    awayCorner?: number;
-  } | null;
-};
-
 function normalizeMatch(
-  raw: RawMatch,
+  raw: RawLiveMatch,
   today: string,
   tomorrow: string,
   now: Date,
-  historic: Awaited<ReturnType<typeof getHistoricBundle>> | null
+  historic: Awaited<ReturnType<typeof getHistoricBundleSoft>>
 ): FootballMatch | null {
   if (!raw.id || !raw.kickOffTime) return null;
   const day = hktDateFromIso(raw.kickOffTime);
@@ -106,10 +91,9 @@ function normalizeMatch(
 }
 
 /**
- * HKJC GraphQL rejects startDate/endDate filters in this environment.
- * Fetch open matches with empty oddsTypes (schedule + live scores/corners
- * only — no foPools for prediction). Historic form is fetched in parallel
- * (process-cached ~20min) and drives all picks.
+ * Fetch live HKJC matches via Workers-safe native GraphQL, then enrich with
+ * soft-timeout historic form. Prefer live matches (even with Incomplete
+ * Data) over demo fixtures whenever the live list is non-empty after filter.
  */
 export async function fetchMatchesPayload(): Promise<MatchesApiResponse> {
   const now = new Date();
@@ -117,66 +101,71 @@ export async function fetchMatchesPayload(): Promise<MatchesApiResponse> {
   const tomorrow = addDaysHkt(now, 1);
   const fetchedAt = now.toISOString();
 
+  let rawMatches: RawLiveMatch[] = [];
+  let liveError: string | null = null;
+
   try {
-    const api = new FootballAPI();
-    // Empty oddsTypes → no market pools; keeps pipeline odds-free for picks.
-    const [rawMatches, historic] = await Promise.all([
-      api.getAllFootballMatches({ oddsTypes: [] }),
-      getHistoricBundle().catch(() => null),
-    ]);
+    // Empty oddsTypes → foPools empty; whitelist still satisfied.
+    rawMatches = await fetchLiveFootballMatches([]);
+  } catch (err) {
+    liveError =
+      err instanceof Error ? err.message : "Unknown HKJC fetch error";
+  }
 
-    const matches = ((rawMatches || []) as RawMatch[])
-      .map((m) => normalizeMatch(m, today, tomorrow, now, historic))
-      .filter((m): m is FootballMatch => !!m)
-      .sort(
-        (a, b) =>
-          new Date(a.kickOffTime).getTime() - new Date(b.kickOffTime).getTime()
-      );
+  const rawMatchCount = rawMatches.length;
 
-    if (!matches.length) {
-      const demo = buildDemoMatches(now);
-      return {
-        ok: true,
-        source: "demo",
-        error:
-          "Live HKJC returned no today/tomorrow matches after filter; showing demo fixtures.",
-        timezone: "Asia/Hong_Kong",
-        today,
-        tomorrow,
-        fetchedAt,
-        matchCount: demo.length,
-        matches: demo,
-        historicNote: historic?.note ?? null,
-      };
-    }
+  // Soft historic: never block the live schedule on a cold ~15s fill.
+  const historic = await getHistoricBundleSoft(4_000).catch(() => null);
 
+  const matches = rawMatches
+    .map((m) => normalizeMatch(m, today, tomorrow, now, historic))
+    .filter((m): m is FootballMatch => !!m)
+    .sort(
+      (a, b) =>
+        new Date(a.kickOffTime).getTime() - new Date(b.kickOffTime).getTime()
+    );
+
+  const filteredCount = matches.length;
+  const historicNote = historic?.note ?? null;
+
+  if (filteredCount > 0) {
     return {
       ok: true,
       source: "live",
-      error: null,
+      error: liveError,
       timezone: "Asia/Hong_Kong",
       today,
       tomorrow,
       fetchedAt,
-      matchCount: matches.length,
+      matchCount: filteredCount,
       matches,
-      historicNote: historic?.note ?? null,
-    };
-  } catch (err) {
-    const message =
-      err instanceof Error ? err.message : "Unknown HKJC fetch error";
-    const demo = buildDemoMatches(now);
-    return {
-      ok: false,
-      source: "demo",
-      error: `Live HKJC fetch failed: ${message}`,
-      timezone: "Asia/Hong_Kong",
-      today,
-      tomorrow,
-      fetchedAt,
-      matchCount: demo.length,
-      matches: demo,
-      historicNote: null,
+      historicNote,
+      rawMatchCount,
+      filteredCount,
     };
   }
+
+  // No today/tomorrow matches after filter — only then fall back to demo.
+  const demo = buildDemoMatches(now);
+  const filterNote =
+    rawMatchCount > 0
+      ? `Live HKJC returned ${rawMatchCount} matches but 0 for today/tomorrow (${today}/${tomorrow}) after filter`
+      : liveError
+        ? `Live HKJC fetch failed: ${liveError}`
+        : "Live HKJC returned no matches";
+
+  return {
+    ok: !liveError,
+    source: "demo",
+    error: `${filterNote}; showing demo fixtures.`,
+    timezone: "Asia/Hong_Kong",
+    today,
+    tomorrow,
+    fetchedAt,
+    matchCount: demo.length,
+    matches: demo,
+    historicNote,
+    rawMatchCount,
+    filteredCount,
+  };
 }

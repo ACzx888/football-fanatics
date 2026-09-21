@@ -85,4 +85,8 @@ export interface MatchesApiResponse {
   matches: FootballMatch[];
   /** Present when historic form was partially/fully used. */
   historicNote?: string | null;
+  /** Raw HKJC match count before today/tomorrow filter. */
+  rawMatchCount?: number;
+  /** Matches remaining after today/tomorrow HKT filter. */
+  filteredCount?: number;
 }
