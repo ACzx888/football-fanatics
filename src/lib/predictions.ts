@@ -8,7 +8,7 @@ import type {
 } from "./types";
 
 /** Minimum relevant completed games per side before HAD is offered. */
-export const MIN_HAD_SAMPLES = 3;
+export const MIN_HAD_SAMPLES = 2;
 
 function roundPct(n: number): number {
   return Math.round(n * 10) / 10;
@@ -116,7 +116,7 @@ function estimateLambdas(
 
   const sample = Math.min(sampleHome, sampleAway);
   // Shrink noisy rates toward league average when sample is thin
-  const shrink = sample >= 8 ? 0 : sample >= 5 ? 0.15 : sample >= 3 ? 0.35 : 0.5;
+  const shrink = sample >= 8 ? 0 : sample >= 5 ? 0.15 : sample >= 3 ? 0.35 : sample >= 2 ? 0.55 : 0.65;
   lh = lh * (1 - shrink) + avg * 1.08 * shrink;
   la = la * (1 - shrink) + avg * shrink;
 
@@ -150,9 +150,14 @@ function fundamentalConfidence(
   if (stability > 1.4) conf -= 6;
   else if (stability > 1.0) conf -= 3;
   else if (stability < 0.7) conf += 2;
+  // Thin samples → lower confidence (still allow HAD at ≥2)
+  if (sample <= 2) conf -= 8;
+  else if (sample <= 3) conf -= 4;
   // Cap pick strength so we never invent high confidence
   conf = Math.min(conf, pickPct * 0.95);
-  return roundPct(clamp(conf, 28, 82));
+  const confFloor = sample <= 2 ? 22 : 28;
+  const confCeil = sample <= 2 ? 62 : 82;
+  return roundPct(clamp(conf, confFloor, confCeil));
 }
 
 function hadPrediction(ctx: PredictionContext): PredictionOutcome {
@@ -203,6 +208,7 @@ function hadPrediction(ctx: PredictionContext): PredictionOutcome {
 
   const factors: string[] = ["xG model"];
   if (lambdas.sample >= 6) factors.push("form↑");
+  else if (lambdas.sample <= 2) factors.push("form↓ thin");
   else factors.push("form");
   if (tempo > league * 1.15) factors.push("tempo↑");
   else if (tempo < league * 0.85) factors.push("tempo↓");
@@ -278,7 +284,7 @@ function totalCornersPrediction(ctx: PredictionContext): PredictionOutcome {
   if (
     ctx.isInPlay &&
     elapsed != null &&
-    elapsed >= 8 &&
+    elapsed >= 5 &&
     ctx.live?.corner != null &&
     ctx.live.corner >= 0
   ) {
@@ -349,7 +355,7 @@ function teamCornersPrediction(
   if (
     ctx.isInPlay &&
     elapsed != null &&
-    elapsed >= 8 &&
+    elapsed >= 5 &&
     liveC != null &&
     liveC >= 0
   ) {

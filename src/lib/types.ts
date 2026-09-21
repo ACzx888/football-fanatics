@@ -89,4 +89,13 @@ export interface MatchesApiResponse {
   rawMatchCount?: number;
   /** Matches remaining after today/tomorrow HKT filter. */
   filteredCount?: number;
+  /** Debug: how many scheduled teams have historic form samples. */
+  formCoverage?: {
+    teamsWithForm: number;
+    total: number;
+    teamsWithAtLeast2?: number;
+    teamsFromKv?: number;
+    teamsFetched?: number;
+    timedOut?: boolean;
+  } | null;
 }

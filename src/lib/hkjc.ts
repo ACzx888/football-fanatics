@@ -1,5 +1,10 @@
 import { buildDemoMatches } from "./demo-data";
-import { getHistoricBundleSoft, getTeamForm } from "./historic";
+import {
+  getTeamForm,
+  loadHistoricForTeams,
+  type HistoricBundle,
+  type TeamRef,
+} from "./historic";
 import {
   fetchLiveFootballMatches,
   type RawLiveMatch,
@@ -19,7 +24,7 @@ function normalizeMatch(
   today: string,
   tomorrow: string,
   now: Date,
-  historic: Awaited<ReturnType<typeof getHistoricBundleSoft>>
+  historic: HistoricBundle | null
 ): FootballMatch | null {
   if (!raw.id || !raw.kickOffTime) return null;
   const day = hktDateFromIso(raw.kickOffTime);
@@ -90,10 +95,45 @@ function normalizeMatch(
   };
 }
 
+
+function collectMatchPairs(
+  rawMatches: RawLiveMatch[],
+  today: string,
+  tomorrow: string
+): Array<[string, string]> {
+  const pairs: Array<[string, string]> = [];
+  for (const raw of rawMatches) {
+    if (!raw.kickOffTime || !raw.homeTeam?.id || !raw.awayTeam?.id) continue;
+    const day = hktDateFromIso(raw.kickOffTime);
+    if (day !== today && day !== tomorrow) continue;
+    pairs.push([raw.homeTeam.id, raw.awayTeam.id]);
+  }
+  return pairs;
+}
+
+function collectTeamRefs(rawMatches: RawLiveMatch[], today: string, tomorrow: string): TeamRef[] {
+  const map = new Map<string, string>();
+  const order: string[] = [];
+  for (const raw of rawMatches) {
+    if (!raw.kickOffTime) continue;
+    const day = hktDateFromIso(raw.kickOffTime);
+    if (day !== today && day !== tomorrow) continue;
+    // Interleave home/away so pair fetches stay adjacent under a budget cut-off
+    for (const team of [raw.homeTeam, raw.awayTeam]) {
+      if (!team?.id) continue;
+      if (!map.has(team.id)) {
+        map.set(team.id, team.name_en || team.id);
+        order.push(team.id);
+      }
+    }
+  }
+  return order.map((id) => ({ id, name: map.get(id)! }));
+}
+
 /**
  * Fetch live HKJC matches via Workers-safe native GraphQL, then enrich with
- * soft-timeout historic form. Prefer live matches (even with Incomplete
- * Data) over demo fixtures whenever the live list is non-empty after filter.
+ * team-targeted historic form (KV-cached). Prefer live matches (even with
+ * Incomplete Data) over demo fixtures whenever the filtered list is non-empty.
  */
 export async function fetchMatchesPayload(): Promise<MatchesApiResponse> {
   const now = new Date();
@@ -113,9 +153,19 @@ export async function fetchMatchesPayload(): Promise<MatchesApiResponse> {
   }
 
   const rawMatchCount = rawMatches.length;
+  const teamRefs = collectTeamRefs(rawMatches, today, tomorrow);
+  const matchPairs = collectMatchPairs(rawMatches, today, tomorrow);
 
-  // Soft historic: never block the live schedule on a cold ~15s fill.
-  const historic = await getHistoricBundleSoft(4_000).catch(() => null);
+  let historic: HistoricBundle | null = null;
+  if (teamRefs.length > 0) {
+    try {
+      historic = await loadHistoricForTeams(teamRefs, {
+        matchPairs,
+      });
+    } catch {
+      historic = null;
+    }
+  }
 
   const matches = rawMatches
     .map((m) => normalizeMatch(m, today, tomorrow, now, historic))
@@ -127,6 +177,16 @@ export async function fetchMatchesPayload(): Promise<MatchesApiResponse> {
 
   const filteredCount = matches.length;
   const historicNote = historic?.note ?? null;
+  const formCoverage = historic?.formCoverage
+    ? {
+        teamsWithForm: historic.formCoverage.teamsWithForm,
+        total: historic.formCoverage.teamsRequested,
+        teamsWithAtLeast2: historic.formCoverage.teamsWithAtLeast2,
+        teamsFromKv: historic.formCoverage.teamsFromKv,
+        teamsFetched: historic.formCoverage.teamsFetched,
+        timedOut: historic.formCoverage.timedOut,
+      }
+    : null;
 
   if (filteredCount > 0) {
     return {
@@ -140,6 +200,7 @@ export async function fetchMatchesPayload(): Promise<MatchesApiResponse> {
       matchCount: filteredCount,
       matches,
       historicNote,
+      formCoverage,
       rawMatchCount,
       filteredCount,
     };
@@ -165,6 +226,7 @@ export async function fetchMatchesPayload(): Promise<MatchesApiResponse> {
     matchCount: demo.length,
     matches: demo,
     historicNote,
+    formCoverage,
     rawMatchCount,
     filteredCount,
   };

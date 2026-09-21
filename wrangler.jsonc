@@ -10,5 +10,12 @@
   },
   "observability": {
     "enabled": true
-  }
+  },
+  "kv_namespaces": [
+    {
+      "binding": "HISTORIC_CACHE",
+      "id": "0b9d4b44d2c245e8a930835404f9d0bd",
+      "preview_id": "25bd62136e5f4620854a499276af01b7"
+    }
+  ]
 }
