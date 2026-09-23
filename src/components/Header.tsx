@@ -1,3 +1,5 @@
+import { SiteNav } from "./SiteNav";
+
 export function Header({
   today,
   tomorrow,
@@ -28,9 +30,12 @@ export function Header({
       <div className="relative mx-auto flex max-w-6xl flex-col gap-4 px-4 py-8 sm:px-6 lg:px-8">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-accent/30 bg-accent/10 px-3 py-1 text-xs font-medium uppercase tracking-wider text-accent">
-              <span className="h-1.5 w-1.5 rounded-full bg-accent shadow-[0_0_8px_#22c55e]" />
-              Fundamental Match Desk
+            <div className="mb-2 flex flex-wrap items-center gap-3">
+              <div className="inline-flex items-center gap-2 rounded-full border border-accent/30 bg-accent/10 px-3 py-1 text-xs font-medium uppercase tracking-wider text-accent">
+                <span className="h-1.5 w-1.5 rounded-full bg-accent shadow-[0_0_8px_#22c55e]" />
+                Fundamental Match Desk
+              </div>
+              <SiteNav active="home" />
             </div>
             <h1 className="text-3xl font-bold tracking-tight text-white sm:text-4xl">
               Football<span className="text-accent">Fanatics</span>
