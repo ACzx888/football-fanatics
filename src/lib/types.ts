@@ -41,6 +41,10 @@ export interface MatchPredictions {
   totalCorners: PredictionOutcome;
   homeCorners: PredictionOutcome;
   awayCorners: PredictionOutcome;
+  /** Expected home goals (Poisson λ) — same availability gate as HAD. */
+  homeGoals: PredictionOutcome;
+  /** Expected away goals (Poisson λ) — same availability gate as HAD. */
+  awayGoals: PredictionOutcome;
   method: string;
 }
 

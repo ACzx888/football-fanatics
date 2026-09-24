@@ -7,7 +7,7 @@ import type {
   PredictionSource,
 } from "./types";
 
-/** Minimum relevant completed games per side before HAD is offered. */
+/** Minimum relevant completed games per side before HAD / team scores are offered. */
 export const MIN_HAD_SAMPLES = 2;
 
 function roundPct(n: number): number {
@@ -76,6 +76,14 @@ export interface PredictionContext {
   historicOk?: boolean;
 }
 
+type LambdaEstimate = {
+  lh: number;
+  la: number;
+  sampleHome: number;
+  sampleAway: number;
+  sample: number;
+};
+
 /**
  * Attack/defence rates from recent completed matches (home/away adjusted).
  * No market / HDC / odds inputs.
@@ -84,13 +92,7 @@ function estimateLambdas(
   home: TeamForm | null | undefined,
   away: TeamForm | null | undefined,
   leagueAvg: number
-): {
-  lh: number;
-  la: number;
-  sampleHome: number;
-  sampleAway: number;
-  sample: number;
-} | null {
+): LambdaEstimate | null {
   if (!home || !away) return null;
   const sampleHome = home.samples.length;
   const sampleAway = away.samples.length;
@@ -151,21 +153,34 @@ function fundamentalConfidence(
   return roundPct(clamp(conf, confFloor, confCeil));
 }
 
-function hadPrediction(ctx: PredictionContext): PredictionOutcome {
-  const lambdas = estimateLambdas(
-    ctx.homeForm,
-    ctx.awayForm,
-    ctx.leagueAvgGoals ?? 1.3
+/** Sample-based confidence for expected goals (fundamental only — no odds). */
+function goalsConfidence(sample: number, stability: number): number {
+  let conf = 38 + Math.min(sample, 10) * 2.5;
+  if (stability > 1.4) conf -= 6;
+  else if (stability > 1.0) conf -= 3;
+  else if (stability < 0.7) conf += 2;
+  if (sample <= 2) conf -= 8;
+  else if (sample <= 3) conf -= 4;
+  const confFloor = sample <= 2 ? 22 : 28;
+  const confCeil = sample <= 2 ? 62 : 78;
+  return roundPct(clamp(conf, confFloor, confCeil));
+}
+
+function insufficientLambdas(ctx: PredictionContext): PredictionOutcome {
+  const hN = ctx.homeForm?.samples.length ?? 0;
+  const aN = ctx.awayForm?.samples.length ?? 0;
+  return insufficient(
+    hN < MIN_HAD_SAMPLES || aN < MIN_HAD_SAMPLES
+      ? `Need ≥${MIN_HAD_SAMPLES} recent games each side (have ${hN}/${aN})`
+      : "No historic form for both sides"
   );
-  if (!lambdas) {
-    const hN = ctx.homeForm?.samples.length ?? 0;
-    const aN = ctx.awayForm?.samples.length ?? 0;
-    return insufficient(
-      hN < MIN_HAD_SAMPLES || aN < MIN_HAD_SAMPLES
-        ? `Need ≥${MIN_HAD_SAMPLES} recent games each side (have ${hN}/${aN})`
-        : "No historic form for both sides"
-    );
-  }
+}
+
+function hadPrediction(
+  ctx: PredictionContext,
+  lambdas: LambdaEstimate | null
+): PredictionOutcome {
+  if (!lambdas) return insufficientLambdas(ctx);
 
   const model = poissonHadProbs(lambdas.lh, lambdas.la);
 
@@ -243,6 +258,53 @@ function hadPrediction(ctx: PredictionContext): PredictionOutcome {
       `Fundamental Poisson · sample ${lambdas.sampleHome}+${lambdas.sampleAway} matches`,
       `xG≈${round1(lambdas.lh)}-${round1(lambdas.la)}`,
       `sep ${round1(top.pct - second.pct)}pp · no odds`,
+    ].join(" · "),
+  };
+}
+
+/**
+ * Team expected goals from the same Poisson λ as HAD.
+ * Locked once written — never re-projected from live score.
+ */
+function teamGoalsPrediction(
+  side: "home" | "away",
+  ctx: PredictionContext,
+  lambdas: LambdaEstimate | null
+): PredictionOutcome {
+  if (!lambdas) return insufficientLambdas(ctx);
+
+  const exp = round1(side === "home" ? lambdas.lh : lambdas.la);
+  const other = round1(side === "home" ? lambdas.la : lambdas.lh);
+  const scoreline = `~${round1(lambdas.lh)} – ${round1(lambdas.la)}`;
+
+  const factors: string[] = ["xG model"];
+  if (lambdas.sample >= 6) factors.push("form↑");
+  else if (lambdas.sample <= 2) factors.push("form↓ thin");
+  else factors.push("form");
+
+  const homeRelevant = ctx.homeForm?.homeSamples ?? 0;
+  const awayRelevant = ctx.awayForm?.awaySamples ?? 0;
+  if (homeRelevant >= 3 && awayRelevant >= 3) factors.push("h/a splits");
+
+  const stability =
+    (rateStability(ctx.homeForm) + rateStability(ctx.awayForm)) / 2;
+  const conf = goalsConfidence(lambdas.sample, stability);
+
+  const sideLabel = side === "home" ? "Home" : "Away";
+
+  return {
+    available: true,
+    label: `~${exp} goals`,
+    confidencePct: conf,
+    expectedValue: exp,
+    line: null,
+    modelProb: null,
+    sources: ["xG", "form"],
+    factors,
+    detail: [
+      `${sideLabel} λ=${exp} · scoreline ${scoreline}`,
+      `sample ${lambdas.sampleHome}+${lambdas.sampleAway}`,
+      `vs ${other} · no odds / no inplay rate`,
     ].join(" · "),
   };
 }
@@ -379,7 +441,17 @@ function teamCornersPrediction(
 export function buildPredictions(
   ctx: PredictionContext = {}
 ): MatchPredictions {
-  const had = hadPrediction(ctx);
+  // Shared Poisson λs feed both HAD and team-score outcomes (computed once).
+  const lambdas = estimateLambdas(
+    ctx.homeForm,
+    ctx.awayForm,
+    ctx.leagueAvgGoals ?? 1.3
+  );
+
+  const had = hadPrediction(ctx, lambdas);
+  const homeGoals = teamGoalsPrediction("home", ctx, lambdas);
+  const awayGoals = teamGoalsPrediction("away", ctx, lambdas);
+
   const totalCorners = totalCornersPrediction(ctx);
   const totalExp = totalCorners.available
     ? totalCorners.expectedValue ?? null
@@ -390,6 +462,8 @@ export function buildPredictions(
     totalCorners,
     homeCorners: teamCornersPrediction("home", totalExp, ctx),
     awayCorners: teamCornersPrediction("away", totalExp, ctx),
+    homeGoals,
+    awayGoals,
     method: "fundamental-only / no odds",
   };
 }

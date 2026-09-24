@@ -149,6 +149,13 @@ function SummarySection({ summary }: { summary: PredictionSummary }) {
           {summary.cornersCompared}
         </p>
       )}
+
+      {summary.goalsCompared > 0 && (
+        <p className="text-xs text-slate-500">
+          Both team scores within ±0.75 of expected: {summary.goalsClose}/
+          {summary.goalsCompared}
+        </p>
+      )}
     </div>
   );
 }
@@ -158,6 +165,16 @@ function RecordRow({ rec }: { rec: PredictionRecord }) {
     rec.homeScore != null && rec.awayScore != null
       ? `${rec.homeScore}–${rec.awayScore}`
       : "—";
+  const expHome =
+    rec.homeGoals?.available && rec.homeGoals.expected != null
+      ? rec.homeGoals.expected.toFixed(1)
+      : null;
+  const expAway =
+    rec.awayGoals?.available && rec.awayGoals.expected != null
+      ? rec.awayGoals.expected.toFixed(1)
+      : null;
+  const expScoreline =
+    expHome != null && expAway != null ? `${expHome}-${expAway}` : "—";
   const cornerExp =
     rec.totalCorners.available && rec.totalCorners.expected != null
       ? `~${rec.totalCorners.expected}`
@@ -200,7 +217,19 @@ function RecordRow({ rec }: { rec: PredictionRecord }) {
         )}
       </td>
       <td className="px-3 py-3 align-top font-mono text-sm text-slate-200">
-        {score}
+        <div className="text-xs text-slate-500">
+          exp{" "}
+          <span className="text-slate-300">{expScoreline}</span>
+        </div>
+        <div>
+          act <span className="text-white">{score}</span>
+          {rec.homeGoalsClose === true && rec.awayGoalsClose === true && (
+            <span className="ml-1 text-emerald-500">≈</span>
+          )}
+          {(rec.homeGoalsClose === false || rec.awayGoalsClose === false) && (
+            <span className="ml-1 text-rose-400">≠</span>
+          )}
+        </div>
       </td>
       <td className="px-3 py-3 align-top">
         <VerdictBadge rec={rec} />
@@ -333,7 +362,7 @@ export function HistoryBoard({ initial }: { initial: PredictionsApiResponse }) {
                   <th className="px-3 py-3 font-medium">Kickoff (HKT)</th>
                   <th className="px-3 py-3 font-medium">Match</th>
                   <th className="px-3 py-3 font-medium">HAD pick</th>
-                  <th className="px-3 py-3 font-medium">Score</th>
+                  <th className="px-3 py-3 font-medium">Score exp→act</th>
                   <th className="px-3 py-3 font-medium">Result</th>
                   <th className="px-3 py-3 font-medium">Corners exp→act</th>
                 </tr>
@@ -350,7 +379,8 @@ export function HistoryBoard({ initial }: { initial: PredictionsApiResponse }) {
         <footer className="mt-10 space-y-3 border-t border-slate-800 pt-6">
           <p className="text-center text-[11px] leading-relaxed text-slate-500">
             HAD accuracy = settled picks where the model&apos;s Home/Draw/Away
-            choice matches the final 1X2. Corners marked ≈ when |expected −
+            choice matches the final 1X2. Team scores marked ≈ when both
+            |expected − actual| ≤ 0.75. Corners marked ≈ when |expected −
             actual| ≤ 1.5 (skipped when HKJC corner data is missing). No odds
             stored.
           </p>

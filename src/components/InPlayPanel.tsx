@@ -22,6 +22,8 @@ export function InPlayPanel({ match }: { match: FootballMatch }) {
   const expTotal = match.predictions.totalCorners.expectedValue ?? null;
   const expHome = match.predictions.homeCorners.expectedValue ?? null;
   const expAway = match.predictions.awayCorners.expectedValue ?? null;
+  const expHomeGoals = match.predictions.homeGoals.expectedValue ?? null;
+  const expAwayGoals = match.predictions.awayGoals.expectedValue ?? null;
 
   return (
     <div className="rounded-xl border border-rose-500/30 bg-rose-500/5 p-3">
@@ -42,7 +44,17 @@ export function InPlayPanel({ match }: { match: FootballMatch }) {
         )}
       </div>
 
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        <DeltaCard
+          title="Home Goals"
+          expected={expHomeGoals}
+          actual={live?.homeScore ?? null}
+        />
+        <DeltaCard
+          title="Away Goals"
+          expected={expAwayGoals}
+          actual={live?.awayScore ?? null}
+        />
         <DeltaCard
           title="Total Corners"
           expected={expTotal}
@@ -62,12 +74,22 @@ export function InPlayPanel({ match }: { match: FootballMatch }) {
 
       {match.predictions.had.available && live?.homeScore != null && (
         <p className="mt-2 text-[11px] text-slate-500">
-          Locked HAD forecast: <span className="text-slate-300">{match.predictions.had.label}</span>
+          Locked HAD forecast:{" "}
+          <span className="text-slate-300">{match.predictions.had.label}</span>
           {" · "}
           Actual score{" "}
           <span className="text-slate-300">
             {live.homeScore}-{live.awayScore}
           </span>
+          {expHomeGoals != null && expAwayGoals != null && (
+            <>
+              {" · "}
+              Expected{" "}
+              <span className="text-slate-300">
+                ~{expHomeGoals.toFixed(1)}–{expAwayGoals.toFixed(1)}
+              </span>
+            </>
+          )}
         </p>
       )}
     </div>

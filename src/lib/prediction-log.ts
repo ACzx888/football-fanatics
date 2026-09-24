@@ -14,6 +14,8 @@ const MAX_INDEX = 400;
 const SETTLE_BATCH = 8;
 /** Corner expected vs actual absolute tolerance for "close enough". */
 const CORNER_TOLERANCE = 1.5;
+/** Team goals expected vs actual absolute tolerance for "close enough". */
+const GOAL_TOLERANCE = 0.75;
 
 export type HadPickCode = "H" | "D" | "A" | string;
 
@@ -54,6 +56,8 @@ export interface PredictionRecord {
   totalCorners: StoredCornerPrediction;
   homeCorners: StoredCornerPrediction;
   awayCorners: StoredCornerPrediction;
+  homeGoals: StoredCornerPrediction;
+  awayGoals: StoredCornerPrediction;
   /** Result fields — null until settled */
   homeScore: number | null;
   awayScore: number | null;
@@ -65,6 +69,8 @@ export interface PredictionRecord {
   hadCorrect: boolean | null;
   /** true when |expected - actual| <= tolerance; null if missing data */
   cornersClose: boolean | null;
+  homeGoalsClose: boolean | null;
+  awayGoalsClose: boolean | null;
   settleStatus: "pending" | "settled" | "void";
 }
 
@@ -86,6 +92,8 @@ export interface PredictionSummary {
   }>;
   cornersCompared: number;
   cornersClose: number;
+  goalsCompared: number;
+  goalsClose: number;
 }
 
 export interface PredictionsApiResponse {
@@ -218,6 +226,8 @@ function fromMatch(
     totalCorners: cornerStored(m.predictions.totalCorners),
     homeCorners: cornerStored(m.predictions.homeCorners),
     awayCorners: cornerStored(m.predictions.awayCorners),
+    homeGoals: cornerStored(m.predictions.homeGoals),
+    awayGoals: cornerStored(m.predictions.awayGoals),
     homeScore: existing?.homeScore ?? null,
     awayScore: existing?.awayScore ?? null,
     corners: existing?.corners ?? null,
@@ -227,6 +237,8 @@ function fromMatch(
     hadActual: existing?.hadActual ?? null,
     hadCorrect: existing?.hadCorrect ?? null,
     cornersClose: existing?.cornersClose ?? null,
+    homeGoalsClose: existing?.homeGoalsClose ?? null,
+    awayGoalsClose: existing?.awayGoalsClose ?? null,
     settleStatus: existing?.settleStatus ?? "pending",
   };
   return base;
@@ -255,7 +267,10 @@ export async function recordLivePredictions(
         m.predictions.totalCorners.available ||
         m.predictions.homeCorners.available ||
         m.predictions.awayCorners.available;
-      if (!hasHad && !hasCorner) continue;
+      const hasGoals =
+        m.predictions.homeGoals.available ||
+        m.predictions.awayGoals.available;
+      if (!hasHad && !hasCorner && !hasGoals) continue;
 
       const predictionDay = m.matchDate || hktDateFromIso(m.kickOffTime);
       const key = predictionKey(m.id, predictionDay);
@@ -287,6 +302,16 @@ export async function recordLivePredictions(
           totalCorners: existing.totalCorners,
           homeCorners: existing.homeCorners,
           awayCorners: existing.awayCorners,
+          homeGoals: existing.homeGoals ?? {
+            available: false,
+            expected: null,
+            confidencePct: null,
+          },
+          awayGoals: existing.awayGoals ?? {
+            available: false,
+            expected: null,
+            confidencePct: null,
+          },
           homeScore: existing.homeScore,
           awayScore: existing.awayScore,
           corners: existing.corners,
@@ -296,6 +321,8 @@ export async function recordLivePredictions(
           hadActual: existing.hadActual,
           hadCorrect: existing.hadCorrect,
           cornersClose: existing.cornersClose,
+          homeGoalsClose: existing.homeGoalsClose ?? null,
+          awayGoalsClose: existing.awayGoalsClose ?? null,
           settleStatus: existing.settleStatus,
         };
         await kv.put(key, JSON.stringify(metaOnly));
@@ -353,6 +380,24 @@ function applyResult(
       Math.abs(rec.totalCorners.expected - scores.corners) <= CORNER_TOLERANCE;
   }
 
+  let homeGoalsClose: boolean | null = null;
+  if (
+    rec.homeGoals?.available &&
+    rec.homeGoals.expected != null
+  ) {
+    homeGoalsClose =
+      Math.abs(rec.homeGoals.expected - scores.home) <= GOAL_TOLERANCE;
+  }
+
+  let awayGoalsClose: boolean | null = null;
+  if (
+    rec.awayGoals?.available &&
+    rec.awayGoals.expected != null
+  ) {
+    awayGoalsClose =
+      Math.abs(rec.awayGoals.expected - scores.away) <= GOAL_TOLERANCE;
+  }
+
   return {
     ...rec,
     homeScore: scores.home,
@@ -364,6 +409,8 @@ function applyResult(
     hadActual,
     hadCorrect,
     cornersClose,
+    homeGoalsClose,
+    awayGoalsClose,
     settleStatus: "settled",
     updatedAt: new Date().toISOString(),
   };
@@ -538,6 +585,13 @@ export function computeSummary(records: PredictionRecord[]): PredictionSummary {
   const cornersCompared = settled.filter((r) => r.cornersClose != null);
   const cornersClose = cornersCompared.filter((r) => r.cornersClose === true);
 
+  const goalsCompared = settled.filter(
+    (r) => r.homeGoalsClose != null || r.awayGoalsClose != null
+  );
+  const goalsCloseCount = goalsCompared.filter(
+    (r) => r.homeGoalsClose === true && r.awayGoalsClose === true
+  ).length;
+
   return {
     total: records.length,
     pending: pending.length,
@@ -562,6 +616,8 @@ export function computeSummary(records: PredictionRecord[]): PredictionSummary {
     byLeague,
     cornersCompared: cornersCompared.length,
     cornersClose: cornersClose.length,
+    goalsCompared: goalsCompared.length,
+    goalsClose: goalsCloseCount,
   };
 }
 
@@ -618,8 +674,40 @@ export async function getPredictionsPayload(): Promise<PredictionsApiResponse> {
 }
 
 
+function cornerFromStored(
+  stored: StoredCornerPrediction | undefined | null,
+  sources: Array<"form" | "xG"> = ["form"]
+): MatchPredictions["totalCorners"] {
+  if (!stored) {
+    return {
+      available: false,
+      label: "Insufficient Data",
+      reason: "Insufficient Data at lock time",
+    };
+  }
+  return {
+    available: stored.available,
+    label: stored.label,
+    confidencePct: stored.confidencePct ?? undefined,
+    expectedValue: stored.expected,
+    sources: stored.available ? sources : undefined,
+    factors: stored.available ? ["locked"] : undefined,
+    reason: stored.available ? undefined : "Insufficient Data at lock time",
+  };
+}
+
 /** Rebuild MatchPredictions from a locked KV snapshot (forecast fields only). */
 export function predictionsFromRecord(rec: PredictionRecord): MatchPredictions {
+  const homeGoals = cornerFromStored(rec.homeGoals, ["form", "xG"]);
+  const awayGoals = cornerFromStored(rec.awayGoals, ["form", "xG"]);
+  // Legacy records (pre team-score) → Insufficient Data, never invent values
+  if (!rec.homeGoals) {
+    homeGoals.reason = "No locked team-score snapshot";
+  }
+  if (!rec.awayGoals) {
+    awayGoals.reason = "No locked team-score snapshot";
+  }
+
   return {
     had: {
       available: rec.had.available,
@@ -634,39 +722,11 @@ export function predictionsFromRecord(rec: PredictionRecord): MatchPredictions {
         ? undefined
         : "Insufficient Data at lock time",
     },
-    totalCorners: {
-      available: rec.totalCorners.available,
-      label: rec.totalCorners.label,
-      confidencePct: rec.totalCorners.confidencePct ?? undefined,
-      expectedValue: rec.totalCorners.expected,
-      sources: rec.totalCorners.available ? ["form"] : undefined,
-      factors: rec.totalCorners.available ? ["locked"] : undefined,
-      reason: rec.totalCorners.available
-        ? undefined
-        : "Insufficient Data at lock time",
-    },
-    homeCorners: {
-      available: rec.homeCorners.available,
-      label: rec.homeCorners.label,
-      confidencePct: rec.homeCorners.confidencePct ?? undefined,
-      expectedValue: rec.homeCorners.expected,
-      sources: rec.homeCorners.available ? ["form"] : undefined,
-      factors: rec.homeCorners.available ? ["locked"] : undefined,
-      reason: rec.homeCorners.available
-        ? undefined
-        : "Insufficient Data at lock time",
-    },
-    awayCorners: {
-      available: rec.awayCorners.available,
-      label: rec.awayCorners.label,
-      confidencePct: rec.awayCorners.confidencePct ?? undefined,
-      expectedValue: rec.awayCorners.expected,
-      sources: rec.awayCorners.available ? ["form"] : undefined,
-      factors: rec.awayCorners.available ? ["locked"] : undefined,
-      reason: rec.awayCorners.available
-        ? undefined
-        : "Insufficient Data at lock time",
-    },
+    totalCorners: cornerFromStored(rec.totalCorners),
+    homeCorners: cornerFromStored(rec.homeCorners),
+    awayCorners: cornerFromStored(rec.awayCorners),
+    homeGoals,
+    awayGoals,
     method: "fundamental-only / locked snapshot",
   };
 }

@@ -93,23 +93,48 @@ function Cell({
   );
 }
 
+function scorelineHeader(predictions: MatchPredictions): string | null {
+  const h = predictions.homeGoals;
+  const a = predictions.awayGoals;
+  if (
+    h.available &&
+    a.available &&
+    h.expectedValue != null &&
+    a.expectedValue != null
+  ) {
+    return `~${h.expectedValue.toFixed(1)} – ${a.expectedValue.toFixed(1)}`;
+  }
+  return null;
+}
+
 export function PredictionsPanel({
   predictions,
 }: {
   predictions: MatchPredictions;
 }) {
+  const scoreline = scorelineHeader(predictions);
+
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between gap-2">
-        <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-          Predictions
-        </h3>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+            Predictions
+          </h3>
+          {scoreline && (
+            <span className="rounded-md border border-accent/20 bg-accent/5 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-accent">
+              {scoreline}
+            </span>
+          )}
+        </div>
         <span className="rounded-md border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent">
           fundamental-only / no odds
         </span>
       </div>
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
         <Cell title="HAD (Home / Draw / Away)" outcome={predictions.had} />
+        <Cell title="Home Team Score" outcome={predictions.homeGoals} />
+        <Cell title="Away Team Score" outcome={predictions.awayGoals} />
         <Cell title="Total Corners" outcome={predictions.totalCorners} />
         <Cell title="Home Team Corners" outcome={predictions.homeCorners} />
         <Cell title="Away Team Corners" outcome={predictions.awayCorners} />
