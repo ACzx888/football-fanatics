@@ -236,6 +236,7 @@ function fromMatch(
  * Upsert prediction records for live matches (skip if HAD unavailable and no
  * corner projection — still store when any prediction is available).
  * Idempotent by matchId + predictionDay (HKT kickoff date).
+ * First write wins: never overwrite had / corner forecasts / recordedAt once stored.
  */
 export async function recordLivePredictions(
   matches: FootballMatch[]
@@ -266,28 +267,47 @@ export async function recordLivePredictions(
         existing = null;
       }
 
-      // Do not overwrite settled result fields; refresh prediction if still pending
-      const next = fromMatch(m, predictionDay, existing);
-      if (existing?.settleStatus === "settled") {
-        // Keep result; optionally refresh prediction snapshot only if never settled
-        next.homeScore = existing.homeScore;
-        next.awayScore = existing.awayScore;
-        next.corners = existing.corners;
-        next.homeCorner = existing.homeCorner;
-        next.awayCorner = existing.awayCorner;
-        next.settledAt = existing.settledAt;
-        next.hadActual = existing.hadActual;
-        next.hadCorrect = existing.hadCorrect;
-        next.cornersClose = existing.cornersClose;
-        next.settleStatus = "settled";
-        // Keep original HAD pick once settled (don't rewrite history)
-        next.had = existing.had;
-        next.totalCorners = existing.totalCorners;
-        next.homeCorners = existing.homeCorners;
-        next.awayCorners = existing.awayCorners;
-        next.recordedAt = existing.recordedAt;
+      if (existing) {
+        // First write wins for the forecast. Only refresh non-forecast metadata.
+        const nowIso = new Date().toISOString();
+        const metaOnly: PredictionRecord = {
+          ...existing,
+          frontEndId: m.frontEndId || existing.frontEndId,
+          league: m.league || existing.league,
+          leagueCode: m.leagueCode || existing.leagueCode,
+          homeTeam: m.homeTeam || existing.homeTeam,
+          awayTeam: m.awayTeam || existing.awayTeam,
+          homeTeamId: m.homeTeamId || existing.homeTeamId,
+          awayTeamId: m.awayTeamId || existing.awayTeamId,
+          statusAtRecord: String(m.status),
+          updatedAt: nowIso,
+          // Explicitly keep locked forecast + settlement fields
+          recordedAt: existing.recordedAt,
+          had: existing.had,
+          totalCorners: existing.totalCorners,
+          homeCorners: existing.homeCorners,
+          awayCorners: existing.awayCorners,
+          homeScore: existing.homeScore,
+          awayScore: existing.awayScore,
+          corners: existing.corners,
+          homeCorner: existing.homeCorner,
+          awayCorner: existing.awayCorner,
+          settledAt: existing.settledAt,
+          hadActual: existing.hadActual,
+          hadCorrect: existing.hadCorrect,
+          cornersClose: existing.cornersClose,
+          settleStatus: existing.settleStatus,
+        };
+        await kv.put(key, JSON.stringify(metaOnly));
+        if (!indexSet.has(key)) {
+          indexSet.add(key);
+          index.push(key);
+        }
+        written++;
+        continue;
       }
 
+      const next = fromMatch(m, predictionDay, null);
       await kv.put(key, JSON.stringify(next));
       if (!indexSet.has(key)) {
         indexSet.add(key);
@@ -597,6 +617,87 @@ export async function getPredictionsPayload(): Promise<PredictionsApiResponse> {
   };
 }
 
+
+/** Rebuild MatchPredictions from a locked KV snapshot (forecast fields only). */
+export function predictionsFromRecord(rec: PredictionRecord): MatchPredictions {
+  return {
+    had: {
+      available: rec.had.available,
+      label: rec.had.pick ?? undefined,
+      confidencePct: rec.had.confidencePct ?? undefined,
+      modelProb: rec.had.modelProb,
+      selections: rec.had.selections?.length ? rec.had.selections : undefined,
+      detail: rec.had.detail,
+      sources: rec.had.available ? ["form", "xG"] : undefined,
+      factors: rec.had.available ? ["locked"] : undefined,
+      reason: rec.had.available
+        ? undefined
+        : "Insufficient Data at lock time",
+    },
+    totalCorners: {
+      available: rec.totalCorners.available,
+      label: rec.totalCorners.label,
+      confidencePct: rec.totalCorners.confidencePct ?? undefined,
+      expectedValue: rec.totalCorners.expected,
+      sources: rec.totalCorners.available ? ["form"] : undefined,
+      factors: rec.totalCorners.available ? ["locked"] : undefined,
+      reason: rec.totalCorners.available
+        ? undefined
+        : "Insufficient Data at lock time",
+    },
+    homeCorners: {
+      available: rec.homeCorners.available,
+      label: rec.homeCorners.label,
+      confidencePct: rec.homeCorners.confidencePct ?? undefined,
+      expectedValue: rec.homeCorners.expected,
+      sources: rec.homeCorners.available ? ["form"] : undefined,
+      factors: rec.homeCorners.available ? ["locked"] : undefined,
+      reason: rec.homeCorners.available
+        ? undefined
+        : "Insufficient Data at lock time",
+    },
+    awayCorners: {
+      available: rec.awayCorners.available,
+      label: rec.awayCorners.label,
+      confidencePct: rec.awayCorners.confidencePct ?? undefined,
+      expectedValue: rec.awayCorners.expected,
+      sources: rec.awayCorners.available ? ["form"] : undefined,
+      factors: rec.awayCorners.available ? ["locked"] : undefined,
+      reason: rec.awayCorners.available
+        ? undefined
+        : "Insufficient Data at lock time",
+    },
+    method: "fundamental-only / locked snapshot",
+  };
+}
+
+/**
+ * Overlay match.predictions from KV locked snapshots when present.
+ * Failures are swallowed so /api/matches never breaks.
+ */
+export async function overlayLockedPredictions(
+  matches: FootballMatch[]
+): Promise<number> {
+  const kv = await getKv();
+  if (!kv) return 0;
+  let n = 0;
+  for (const m of matches) {
+    try {
+      const predictionDay = m.matchDate || hktDateFromIso(m.kickOffTime);
+      const key = predictionKey(m.id, predictionDay);
+      const raw = await kv.get(key);
+      if (!raw) continue;
+      const rec = JSON.parse(raw) as PredictionRecord;
+      if (!rec?.matchId) continue;
+      m.predictions = predictionsFromRecord(rec);
+      n++;
+    } catch {
+      // ignore per-match overlay failures
+    }
+  }
+  return n;
+}
+
 /** Used by matches API — ignore failures. */
 export async function sideEffectRecordAndSettle(
   matches: FootballMatch[]
@@ -605,6 +706,12 @@ export async function sideEffectRecordAndSettle(
     await recordLivePredictions(matches);
   } catch {
     // never fail matches
+  }
+  try {
+    // Serve the same locked numbers as History on the match board.
+    await overlayLockedPredictions(matches);
+  } catch {
+    // ignore
   }
   try {
     await settleFromLiveMatches(matches);

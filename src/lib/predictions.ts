@@ -63,24 +63,15 @@ export function poissonHadProbs(
   return { H: H / s, D: D / s, A: A / s };
 }
 
-function parseElapsedMinutes(minuteLabel: string | null | undefined): number | null {
-  if (!minuteLabel) return null;
-  if (minuteLabel === "HT") return 45;
-  if (minuteLabel === "FT") return 90;
-  const m = minuteLabel.match(/^(\d+)/);
-  if (!m) return null;
-  let n = Number(m[1]);
-  const plus = minuteLabel.match(/\+(\d+)/);
-  if (plus) n += Number(plus[1]);
-  return clamp(n, 1, 95);
-}
-
 export interface PredictionContext {
   homeForm?: TeamForm | null;
   awayForm?: TeamForm | null;
   leagueAvgGoals?: number;
+  /** Unused for forecast math — kept for call-site compatibility. */
   isInPlay?: boolean;
+  /** Unused for forecast math — kept for call-site compatibility. */
   minuteLabel?: string | null;
+  /** Unused for forecast math — Actual live stats stay on the match, not the model. */
   live?: LiveResult | null;
   historicOk?: boolean;
 }
@@ -275,53 +266,27 @@ function historicCornerAverage(
 }
 
 function totalCornersPrediction(ctx: PredictionContext): PredictionOutcome {
-  const elapsed = parseElapsedMinutes(ctx.minuteLabel);
+  // Fundamental / historic form only — never project from live minute or live corners.
   const factors: string[] = [];
   const sources: PredictionSource[] = [];
   let exp: number | null = null;
 
-  // Prefer in-play rate projection when live corners + minute available
-  if (
-    ctx.isInPlay &&
-    elapsed != null &&
-    elapsed >= 5 &&
-    ctx.live?.corner != null &&
-    ctx.live.corner >= 0
-  ) {
-    exp = ctx.live.corner / (elapsed / 90);
-    factors.push("inplay rate");
-    sources.push("inplay");
-  }
-
   const hist = historicCornerAverage(ctx.homeForm, ctx.awayForm);
   if (hist) {
-    if (exp == null) {
-      exp = hist.expected;
-      factors.push("historic corners");
-      sources.push("form");
-    } else {
-      // Blend live projection with historic prior
-      exp = exp * 0.7 + hist.expected * 0.3;
-      factors.push("historic corners");
-      if (!sources.includes("form")) sources.push("form");
-    }
+    exp = hist.expected;
+    factors.push("historic corners");
+    sources.push("form");
   }
 
-  if (exp == null) {
+  if (exp == null || !hist) {
     return insufficient(
-      "No historic corner averages (HKJC ttlCornerResult often -1) and no usable in-play corner rate"
+      "No historic corner averages (HKJC ttlCornerResult often -1)"
     );
   }
 
   exp = round1(clamp(exp, 3, 18));
-  const sampleBoost = hist ? Math.min(hist.n, 8) : 0;
-  const conf = roundPct(
-    clamp(
-      40 + sampleBoost * 2.5 + (sources.includes("inplay") ? 8 : 0),
-      36,
-      78
-    )
-  );
+  const sampleBoost = Math.min(hist.n, 8);
+  const conf = roundPct(clamp(40 + sampleBoost * 2.5, 36, 78));
 
   return {
     available: true,
@@ -332,10 +297,7 @@ function totalCornersPrediction(ctx: PredictionContext): PredictionOutcome {
     modelProb: null,
     sources,
     factors,
-    detail: sources.includes("inplay")
-      ? `In-play corner rate projects ~${exp} at FT` +
-        (hist ? ` · historic prior ${round1(hist.expected)} (n=${hist.n})` : "")
-      : `Historic corner avg ~${exp} from ${hist!.n} samples · no odds`,
+    detail: `Historic corner avg ~${exp} from ${hist.n} samples · no odds`,
   };
 }
 
@@ -344,25 +306,11 @@ function teamCornersPrediction(
   totalExpected: number | null,
   ctx: PredictionContext
 ): PredictionOutcome {
+  // Fundamental / historic form only — never project from live minute or live corners.
   const sideLabel = side === "home" ? "home" : "away";
-  const elapsed = parseElapsedMinutes(ctx.minuteLabel);
-  const liveC =
-    side === "home" ? ctx.live?.homeCorner : ctx.live?.awayCorner;
   const factors: string[] = [];
   const sources: PredictionSource[] = [];
   let exp: number | null = null;
-
-  if (
-    ctx.isInPlay &&
-    elapsed != null &&
-    elapsed >= 5 &&
-    liveC != null &&
-    liveC >= 0
-  ) {
-    exp = liveC / (elapsed / 90);
-    factors.push("inplay rate");
-    sources.push("inplay");
-  }
 
   // Historic: share of match totals when corner counts exist
   const form = side === "home" ? ctx.homeForm : ctx.awayForm;
@@ -377,7 +325,7 @@ function teamCornersPrediction(
     }
   }
 
-  if (exp == null && totalExpected != null && histCorners.length >= 3) {
+  if (totalExpected != null && histCorners.length >= 3) {
     const homeAtt =
       ctx.homeForm?.avgScoredHome ?? ctx.homeForm?.avgScored ?? null;
     const awayAtt =
@@ -396,7 +344,7 @@ function teamCornersPrediction(
     exp = totalExpected * share;
     factors.push("historic corners");
     sources.push("form");
-  } else if (exp == null && histCorners.length >= 3 && totalExpected == null) {
+  } else if (histCorners.length >= 3 && totalExpected == null) {
     // Side estimate as ~half of team-match corner totals (weak)
     const avgTotal =
       histCorners.reduce((a, b) => a + b, 0) / histCorners.length;
@@ -406,14 +354,12 @@ function teamCornersPrediction(
   }
 
   if (exp == null) {
-    return insufficient(
-      `No ${sideLabel} corner history and no in-play ${sideLabel} corner rate`
-    );
+    return insufficient(`No ${sideLabel} corner history for fundamental forecast`);
   }
 
   exp = round1(clamp(exp, 0.5, 12));
   const conf = roundPct(
-    clamp(38 + (sources.includes("inplay") ? 10 : 0) + (histCorners.length >= 3 ? 8 : 0), 36, 74)
+    clamp(38 + (histCorners.length >= 3 ? 8 : 0), 36, 74)
   );
 
   return {

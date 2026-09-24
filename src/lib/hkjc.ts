@@ -63,13 +63,12 @@ function normalizeMatch(
   const isInPlay = isInPlayStatus(status);
   const minuteLabel = estimateMinuteLabel(raw.kickOffTime, status, now);
 
+  // Forecasts are fundamental/historic only — never live minute/score/corners.
+  // Actual live stats stay on the match for InPlayPanel display.
   const predictions = buildPredictions({
     homeForm,
     awayForm,
     leagueAvgGoals: historic?.leagueAvgGoals ?? 1.3,
-    isInPlay,
-    minuteLabel,
-    live,
     historicOk: !!(historic?.ok && (homeForm || awayForm)),
   });
 

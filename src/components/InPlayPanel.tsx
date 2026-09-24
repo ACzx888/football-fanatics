@@ -62,7 +62,7 @@ export function InPlayPanel({ match }: { match: FootballMatch }) {
 
       {match.predictions.had.available && live?.homeScore != null && (
         <p className="mt-2 text-[11px] text-slate-500">
-          Pre/live HAD lean: <span className="text-slate-300">{match.predictions.had.label}</span>
+          Locked HAD forecast: <span className="text-slate-300">{match.predictions.had.label}</span>
           {" · "}
           Actual score{" "}
           <span className="text-slate-300">
