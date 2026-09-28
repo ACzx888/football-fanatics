@@ -558,8 +558,16 @@ export async function loadHistoricForTeams(
       const payload = await readTeamFromKv(kv, id);
       if (!payload) return;
       const samples = payload.samples;
-      if (!samples.length) return;
       teamsFromKv++;
+      if (!samples.length) {
+        // Known-empty within short TTL — do not re-hammer HKJC this request
+        store.teamCache.set(id, {
+          samples: [],
+          cachedAt: Date.now() - MEMORY_TTL_MS + MEMORY_TTL_INCOMPLETE_MS,
+        });
+        needDeepen.delete(id);
+        return;
+      }
       const existing = byTeamId.get(id) || [];
       const merged = dedupeSortTrim([...existing, ...samples]);
       byTeamId.set(id, merged);
@@ -569,7 +577,7 @@ export async function loadHistoricForTeams(
       } else if (merged.length >= FAT_SAMPLE_SKIP) {
         needDeepen.delete(id);
       } else {
-        // Keep in needDeepen for older windows
+        // Keep in needDeepen for older windows (1-sample incomplete)
         needDeepen.add(id);
       }
     });
