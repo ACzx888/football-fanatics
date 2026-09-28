@@ -71,7 +71,7 @@ const WINDOW_DAYS = 14;
 const NUM_WINDOWS = 6; // ~84d lookback (6 × 14)
 const MAX_PER_WINDOW = 40;
 const PAGE = 20;
-const CONCURRENCY = 6;
+const CONCURRENCY = 8;
 const MAX_SAMPLES_PER_TEAM = 12;
 /** Soft budget for /api/matches historic enrichment on Workers (~30s OpenNext). */
 export const HISTORIC_BUDGET_MS = 24_000;
@@ -261,6 +261,10 @@ function windowRange(
  * Fetch historic samples for one team across stacked windows.
  * Completes deeper windows for this team before the caller moves on —
  * prefers reaching minSamples over starting brand-new teams.
+ *
+ * If the first two scanned windows yield nothing and there is no seed,
+ * abandon deeper lookback (team likely absent from HKJC history) so we
+ * do not rate-limit the API on forever-empty U20 / friendly sides.
  */
 async function fetchTeamSamplesNetwork(
   teamId: string,
@@ -268,22 +272,31 @@ async function fetchTeamSamplesNetwork(
     budgetExceeded: () => boolean;
     minSamples?: number;
     startWindow?: number;
+    /** How many windows to scan from startWindow (default: remaining). */
+    maxWindows?: number;
     seed?: TeamMatchSample[];
   }
 ): Promise<TeamMatchSample[]> {
-  const collected: TeamMatchSample[] = [...(opts.seed || [])];
+  const seed = opts.seed || [];
+  const collected: TeamMatchSample[] = [...seed];
   const seen = new Set(
     collected.map((s) => `${s.matchId}:${s.isHome ? "H" : "A"}`)
   );
   const minSamples = opts.minSamples ?? 2;
   const startWindow = opts.startWindow ?? 0;
+  const endWindow = Math.min(
+    NUM_WINDOWS,
+    startWindow + (opts.maxWindows ?? NUM_WINDOWS)
+  );
   const now = new Date();
+  let scannedEmpty = 0;
 
-  for (let w = startWindow; w < NUM_WINDOWS; w++) {
+  for (let w = startWindow; w < endWindow; w++) {
     if (opts.budgetExceeded()) break;
     if (collected.length >= Math.max(minSamples, TARGET_SAMPLES)) break;
     if (collected.length >= MAX_SAMPLES_PER_TEAM) break;
 
+    const before = collected.length;
     const range = windowRange(now, w);
     for (let start = 0; start < MAX_PER_WINDOW; start += PAGE) {
       if (opts.budgetExceeded()) break;
@@ -312,6 +325,14 @@ async function fetchTeamSamplesNetwork(
       } catch {
         break;
       }
+    }
+
+    if (collected.length === before) scannedEmpty++;
+    else scannedEmpty = 0;
+
+    // No seed + two consecutive empty windows → stop burning budget
+    if (seed.length === 0 && collected.length === 0 && scannedEmpty >= 2) {
+      break;
     }
   }
 
@@ -582,77 +603,121 @@ export async function loadHistoricForTeams(
       return 0;
     });
 
-  /**
-   * Persist + merge network result for one team.
-   * startWindow: skip recent windows already covered by seed (approx: if
-   * already ≥1 sample, begin at window 1 to spend budget on older history).
-   */
-  async function deepenTeam(id: string): Promise<void> {
-    if (budgetExceeded()) return;
+  async function persistTeam(
+    id: string,
+    merged: TeamMatchSample[],
+    seedLen: number
+  ): Promise<void> {
     const name = unique.get(id) || id;
+    if (merged.length > 0) {
+      byTeamId.set(id, merged);
+      store.teamCache.set(id, { samples: merged, cachedAt: Date.now() });
+      if (kv) await writeTeamToKv(kv, id, name, merged);
+    } else if (seedLen === 0) {
+      store.teamCache.set(id, {
+        samples: [],
+        cachedAt: Date.now() - MEMORY_TTL_MS + 90_000,
+      });
+      if (kv) await writeTeamToKv(kv, id, name, []);
+    }
+  }
+
+  /**
+   * Pass 1 — recent history only (2×14d ≈ 28d) for every thin/missing team.
+   * Maximizes how many teams get ≥1 sample before deeper lookback.
+   */
+  async function fetchRecent(id: string): Promise<void> {
+    if (budgetExceeded()) return;
     const seed = byTeamId.get(id) || [];
-    const startWindow = seed.length >= 1 ? 1 : 0;
+    if (seed.length >= TARGET_SAMPLES) return;
     try {
       const samples = await fetchTeamSamplesNetwork(id, {
         budgetExceeded,
         minSamples: 2,
-        startWindow,
+        startWindow: 0,
+        maxWindows: 2,
         seed,
       });
       teamsFetched++;
-      const merged = dedupeSortTrim([...seed, ...samples]);
-      if (merged.length > 0) {
-        byTeamId.set(id, merged);
-        store.teamCache.set(id, { samples: merged, cachedAt: Date.now() });
-        if (kv) await writeTeamToKv(kv, id, name, merged);
-      } else if (seed.length === 0) {
-        // Negative cache briefly so we don't hammer empty teams
-        store.teamCache.set(id, {
-          samples: [],
-          cachedAt: Date.now() - MEMORY_TTL_MS + 90_000,
-        });
-        if (kv) await writeTeamToKv(kv, id, name, []);
-      }
+      await persistTeam(id, dedupeSortTrim([...seed, ...samples]), seed.length);
     } catch {
       // ignore
     }
   }
 
   if (toFetch.length && !budgetExceeded()) {
-    await mapPool(toFetch, CONCURRENCY, deepenTeam, budgetExceeded);
+    await mapPool(toFetch, CONCURRENCY, fetchRecent, budgetExceeded);
   }
 
-  // 4) Extra deepen pass for anyone still stuck at exactly 1 sample
+  /**
+   * Pass 2 — deepen teams still below 2 samples using older windows (28–84d).
+   * Prefer pair-boosted thin sides so match pairs unlock HAD together.
+   */
   if (!budgetExceeded()) {
-    const stuckAtOne = teamIds
-      .filter((id) => sampleCount(id) === 1)
-      .sort((a, b) => (pairBoost.get(b) || 0) - (pairBoost.get(a) || 0));
-    if (stuckAtOne.length) {
+    const needOlder = teamIds
+      .filter((id) => sampleCount(id) < 2)
+      .sort((a, b) => {
+        const sa = sampleCount(a);
+        const sb = sampleCount(b);
+        // Finish 1-sample teams before pure empties (empties likely hopeless)
+        if (sa !== sb) return sb - sa;
+        return (pairBoost.get(b) || 0) - (pairBoost.get(a) || 0);
+      });
+    if (needOlder.length) {
       await mapPool(
-        stuckAtOne,
+        needOlder,
         CONCURRENCY,
         async (id) => {
           if (budgetExceeded()) return;
-          const name = unique.get(id) || id;
           const seed = byTeamId.get(id) || [];
+          // Skip empties that already failed recent windows — low odds of history
+          if (seed.length === 0) return;
           try {
-            // Start at window 2+ — window 0–1 likely already scanned
             const samples = await fetchTeamSamplesNetwork(id, {
               budgetExceeded,
               minSamples: 2,
               startWindow: 2,
+              maxWindows: NUM_WINDOWS - 2,
               seed,
             });
             teamsFetched++;
-            if (samples.length > seed.length) {
-              const merged = dedupeSortTrim(samples);
-              byTeamId.set(id, merged);
-              store.teamCache.set(id, {
-                samples: merged,
-                cachedAt: Date.now(),
-              });
-              if (kv) await writeTeamToKv(kv, id, name, merged);
+            const merged = dedupeSortTrim(samples);
+            if (merged.length > seed.length) {
+              await persistTeam(id, merged, seed.length);
             }
+          } catch {
+            // ignore
+          }
+        },
+        budgetExceeded
+      );
+    }
+  }
+
+  /**
+   * Pass 3 — if budget remains, try older windows for still-empty teams
+   * (clubs that simply did not play in the last ~28d but have 30–60d history).
+   */
+  if (!budgetExceeded()) {
+    const stillEmpty = teamIds
+      .filter((id) => sampleCount(id) === 0)
+      .sort((a, b) => (pairBoost.get(b) || 0) - (pairBoost.get(a) || 0));
+    if (stillEmpty.length) {
+      await mapPool(
+        stillEmpty,
+        CONCURRENCY,
+        async (id) => {
+          if (budgetExceeded()) return;
+          try {
+            const samples = await fetchTeamSamplesNetwork(id, {
+              budgetExceeded,
+              minSamples: 2,
+              startWindow: 2,
+              maxWindows: 2, // days 29–56 only
+              seed: [],
+            });
+            teamsFetched++;
+            await persistTeam(id, samples, 0);
           } catch {
             // ignore
           }
