@@ -101,5 +101,7 @@ export interface MatchesApiResponse {
     teamsFromKv?: number;
     teamsFetched?: number;
     timedOut?: boolean;
+    lookbackDays?: number;
+    numWindows?: number;
   } | null;
 }

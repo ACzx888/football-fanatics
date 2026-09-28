@@ -184,6 +184,8 @@ export async function fetchMatchesPayload(): Promise<MatchesApiResponse> {
         teamsFromKv: historic.formCoverage.teamsFromKv,
         teamsFetched: historic.formCoverage.teamsFetched,
         timedOut: historic.formCoverage.timedOut,
+        lookbackDays: historic.formCoverage.lookbackDays,
+        numWindows: historic.formCoverage.numWindows,
       }
     : null;
 

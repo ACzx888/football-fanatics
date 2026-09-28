@@ -7,8 +7,14 @@ import type {
   PredictionSource,
 } from "./types";
 
-/** Minimum relevant completed games per side before HAD / team scores are offered. */
+/**
+ * Preferred minimum completed games per side for HAD / team scores.
+ * Soft fallback MIN_HAD_SAMPLES_FALLBACK allows 1+1 with heavier shrink when
+ * wider historic lookback still cannot reach 2+2 (internationals / sparse clubs).
+ */
 export const MIN_HAD_SAMPLES = 2;
+/** Last-resort gate after stacked historic windows — documented as form↓ thin. */
+export const MIN_HAD_SAMPLES_FALLBACK = 1;
 
 function roundPct(n: number): number {
   return Math.round(n * 10) / 10;
@@ -96,7 +102,13 @@ function estimateLambdas(
   if (!home || !away) return null;
   const sampleHome = home.samples.length;
   const sampleAway = away.samples.length;
-  if (sampleHome < MIN_HAD_SAMPLES || sampleAway < MIN_HAD_SAMPLES) return null;
+  // Prefer ≥2 each side; allow 1+1 only as last-resort after wider historic fetch.
+  if (
+    sampleHome < MIN_HAD_SAMPLES_FALLBACK ||
+    sampleAway < MIN_HAD_SAMPLES_FALLBACK
+  ) {
+    return null;
+  }
 
   const avg = leagueAvg > 0.5 ? leagueAvg : 1.3;
   const homeScored = home.avgScoredHome;
@@ -108,8 +120,17 @@ function estimateLambdas(
   let la = (awayScored / avg) * (homeConc / avg) * avg;
 
   const sample = Math.min(sampleHome, sampleAway);
-  // Shrink noisy rates toward league average when sample is thin
-  const shrink = sample >= 8 ? 0 : sample >= 5 ? 0.15 : sample >= 3 ? 0.35 : sample >= 2 ? 0.55 : 0.65;
+  // Shrink noisy rates toward league average when sample is thin (heavier at 1)
+  const shrink =
+    sample >= 8
+      ? 0
+      : sample >= 5
+        ? 0.15
+        : sample >= 3
+          ? 0.35
+          : sample >= 2
+            ? 0.55
+            : 0.78;
   lh = lh * (1 - shrink) + avg * 1.08 * shrink;
   la = la * (1 - shrink) + avg * shrink;
 
@@ -143,13 +164,14 @@ function fundamentalConfidence(
   if (stability > 1.4) conf -= 6;
   else if (stability > 1.0) conf -= 3;
   else if (stability < 0.7) conf += 2;
-  // Thin samples → lower confidence (still allow HAD at ≥2)
-  if (sample <= 2) conf -= 8;
+  // Thin samples → lower confidence (1+1 fallback capped harder)
+  if (sample <= 1) conf -= 14;
+  else if (sample <= 2) conf -= 8;
   else if (sample <= 3) conf -= 4;
   // Cap pick strength so we never invent high confidence
   conf = Math.min(conf, pickPct * 0.95);
-  const confFloor = sample <= 2 ? 22 : 28;
-  const confCeil = sample <= 2 ? 62 : 82;
+  const confFloor = sample <= 1 ? 18 : sample <= 2 ? 22 : 28;
+  const confCeil = sample <= 1 ? 48 : sample <= 2 ? 62 : 82;
   return roundPct(clamp(conf, confFloor, confCeil));
 }
 
@@ -159,10 +181,11 @@ function goalsConfidence(sample: number, stability: number): number {
   if (stability > 1.4) conf -= 6;
   else if (stability > 1.0) conf -= 3;
   else if (stability < 0.7) conf += 2;
-  if (sample <= 2) conf -= 8;
+  if (sample <= 1) conf -= 14;
+  else if (sample <= 2) conf -= 8;
   else if (sample <= 3) conf -= 4;
-  const confFloor = sample <= 2 ? 22 : 28;
-  const confCeil = sample <= 2 ? 62 : 78;
+  const confFloor = sample <= 1 ? 18 : sample <= 2 ? 22 : 28;
+  const confCeil = sample <= 1 ? 46 : sample <= 2 ? 62 : 78;
   return roundPct(clamp(conf, confFloor, confCeil));
 }
 
@@ -170,8 +193,8 @@ function insufficientLambdas(ctx: PredictionContext): PredictionOutcome {
   const hN = ctx.homeForm?.samples.length ?? 0;
   const aN = ctx.awayForm?.samples.length ?? 0;
   return insufficient(
-    hN < MIN_HAD_SAMPLES || aN < MIN_HAD_SAMPLES
-      ? `Need ≥${MIN_HAD_SAMPLES} recent games each side (have ${hN}/${aN})`
+    hN < MIN_HAD_SAMPLES_FALLBACK || aN < MIN_HAD_SAMPLES_FALLBACK
+      ? `Need ≥${MIN_HAD_SAMPLES_FALLBACK} recent games each side (have ${hN}/${aN}; prefer ≥${MIN_HAD_SAMPLES})`
       : "No historic form for both sides"
   );
 }
@@ -214,6 +237,7 @@ function hadPrediction(
 
   const factors: string[] = ["xG model"];
   if (lambdas.sample >= 6) factors.push("form↑");
+  else if (lambdas.sample <= 1) factors.push("form↓ thin (1+1)");
   else if (lambdas.sample <= 2) factors.push("form↓ thin");
   else factors.push("form");
   if (tempo > league * 1.15) factors.push("tempo↑");
@@ -279,6 +303,7 @@ function teamGoalsPrediction(
 
   const factors: string[] = ["xG model"];
   if (lambdas.sample >= 6) factors.push("form↑");
+  else if (lambdas.sample <= 1) factors.push("form↓ thin (1+1)");
   else if (lambdas.sample <= 2) factors.push("form↓ thin");
   else factors.push("form");
 

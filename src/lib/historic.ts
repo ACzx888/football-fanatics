@@ -43,6 +43,8 @@ export interface FormCoverage {
   teamsFromKv: number;
   teamsFetched: number;
   timedOut: boolean;
+  lookbackDays: number;
+  numWindows: number;
 }
 
 export interface HistoricBundle {
@@ -63,20 +65,31 @@ export type TeamRef = { id: string; name: string };
 /**
  * HKJC matchResult returns empty matches when startDate..endDate spans more
  * than ~32 calendar days (matchNumByDate.total can still be correct).
- * Stack fixed ~30d windows to cover ~60 days of history per team.
+ * Stack fixed ~14d windows to cover ~84 days of history per team.
  */
-const WINDOW_DAYS = 14; // faster; still usually ≥2 samples
-const NUM_WINDOWS = 1; // 30d only — HKJC empties beyond ~32d span
+const WINDOW_DAYS = 14;
+const NUM_WINDOWS = 6; // ~84d lookback (6 × 14)
 const MAX_PER_WINDOW = 40;
 const PAGE = 20;
-const CONCURRENCY = 8;
+const CONCURRENCY = 6;
 const MAX_SAMPLES_PER_TEAM = 12;
-/** Soft budget for /api/matches historic enrichment on Workers. */
-export const HISTORIC_BUDGET_MS = 14_000;
-const PER_REQUEST_TIMEOUT_MS = 4_500;
-const KV_TTL_SECONDS = 8 * 60 * 60; // 8 hours
-const KV_KEY_PREFIX = "teamform:v1:";
+/** Soft budget for /api/matches historic enrichment on Workers (~30s OpenNext). */
+export const HISTORIC_BUDGET_MS = 24_000;
+const PER_REQUEST_TIMEOUT_MS = 4_000;
+/** ≥2 samples: keep longer so warm KV hits skip network. */
+const KV_TTL_COMPLETE_SECONDS = 36 * 60 * 60; // 36h
+/** 0–1 samples: short TTL so next request retries deeper windows. */
+const KV_TTL_INCOMPLETE_SECONDS = 90 * 60; // 1.5h
+const KV_KEY_PREFIX = "teamform:v2:";
 const MEMORY_TTL_MS = 20 * 60 * 1000;
+const MEMORY_TTL_INCOMPLETE_MS = 2 * 60 * 1000; // 2 min — force deepen soon
+/** Skip network refresh when KV/memory already has this many samples. */
+const FAT_SAMPLE_SKIP = 6;
+/**
+ * Stop stacking windows once a team reaches this many samples.
+ * Keep low (just above HAD gate) so budget covers more teams.
+ */
+const TARGET_SAMPLES = 3;
 
 type KvTeamPayload = {
   teamId: string;
@@ -84,6 +97,7 @@ type KvTeamPayload = {
   samples: TeamMatchSample[];
   cachedAt: number;
   lookbackDays: number;
+  incomplete?: boolean;
 };
 
 type HistoricGlobal = {
@@ -99,13 +113,17 @@ type FfKv = {
   ): Promise<void>;
 };
 
-const g = globalThis as typeof globalThis & { __ffHistoricV3?: HistoricGlobal };
-if (!g.__ffHistoricV3) {
-  g.__ffHistoricV3 = { teamCache: new Map() };
+const g = globalThis as typeof globalThis & { __ffHistoricV4?: HistoricGlobal };
+if (!g.__ffHistoricV4) {
+  g.__ffHistoricV4 = { teamCache: new Map() };
 }
 
 function getStore(): HistoricGlobal {
-  return g.__ffHistoricV3!;
+  return g.__ffHistoricV4!;
+}
+
+function lookbackDaysTotal(): number {
+  return WINDOW_DAYS * NUM_WINDOWS;
 }
 
 async function getHistoricKv(): Promise<FfKv | null> {
@@ -226,31 +244,47 @@ function dedupeSortTrim(samples: TeamMatchSample[]): TeamMatchSample[] {
   return out.slice(0, MAX_SAMPLES_PER_TEAM);
 }
 
-function windowRanges(
-  now: Date = new Date(),
-  windowIndex = 0
-): Array<{ startDate: string; endDate: string }> {
+/** Single ~WINDOW_DAYS range ending `windowIndex` windows ago. */
+function windowRange(
+  now: Date,
+  windowIndex: number
+): { startDate: string; endDate: string } {
   const endOffset = 1 + windowIndex * WINDOW_DAYS;
   const startOffset = endOffset + (WINDOW_DAYS - 1);
-  return [
-    {
-      startDate: addDaysHkt(now, -startOffset),
-      endDate: addDaysHkt(now, -endOffset),
-    },
-  ];
+  return {
+    startDate: addDaysHkt(now, -startOffset),
+    endDate: addDaysHkt(now, -endOffset),
+  };
 }
 
+/**
+ * Fetch historic samples for one team across stacked windows.
+ * Completes deeper windows for this team before the caller moves on —
+ * prefers reaching minSamples over starting brand-new teams.
+ */
 async function fetchTeamSamplesNetwork(
   teamId: string,
-  opts: { budgetExceeded: () => boolean; minSamples?: number; windowIndex?: number }
+  opts: {
+    budgetExceeded: () => boolean;
+    minSamples?: number;
+    startWindow?: number;
+    seed?: TeamMatchSample[];
+  }
 ): Promise<TeamMatchSample[]> {
-  const ranges = windowRanges(new Date(), opts.windowIndex ?? 0);
-  const collected: TeamMatchSample[] = [];
-  const seen = new Set<string>();
-  const minSamples = opts.minSamples ?? 3;
+  const collected: TeamMatchSample[] = [...(opts.seed || [])];
+  const seen = new Set(
+    collected.map((s) => `${s.matchId}:${s.isHome ? "H" : "A"}`)
+  );
+  const minSamples = opts.minSamples ?? 2;
+  const startWindow = opts.startWindow ?? 0;
+  const now = new Date();
 
-  for (const range of ranges) {
+  for (let w = startWindow; w < NUM_WINDOWS; w++) {
     if (opts.budgetExceeded()) break;
+    if (collected.length >= Math.max(minSamples, TARGET_SAMPLES)) break;
+    if (collected.length >= MAX_SAMPLES_PER_TEAM) break;
+
+    const range = windowRange(now, w);
     for (let start = 0; start < MAX_PER_WINDOW; start += PAGE) {
       if (opts.budgetExceeded()) break;
       try {
@@ -279,8 +313,6 @@ async function fetchTeamSamplesNetwork(
         break;
       }
     }
-    if (collected.length >= Math.max(minSamples, 6)) break;
-    if (collected.length >= MAX_SAMPLES_PER_TEAM) break;
   }
 
   return dedupeSortTrim(collected);
@@ -289,13 +321,20 @@ async function fetchTeamSamplesNetwork(
 async function readTeamFromKv(
   kv: FfKv,
   teamId: string
-): Promise<TeamMatchSample[] | null> {
+): Promise<KvTeamPayload | null> {
   try {
     const raw = await kv.get(`${KV_KEY_PREFIX}${teamId}`);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as KvTeamPayload;
     if (!parsed?.samples || !Array.isArray(parsed.samples)) return null;
-    return dedupeSortTrim(parsed.samples);
+    return {
+      ...parsed,
+      samples: dedupeSortTrim(parsed.samples),
+      incomplete:
+        parsed.incomplete === true ||
+        !parsed.samples ||
+        parsed.samples.length < 2,
+    };
   } catch {
     return null;
   }
@@ -308,15 +347,19 @@ async function writeTeamToKv(
   samples: TeamMatchSample[]
 ): Promise<void> {
   try {
+    const incomplete = samples.length < 2;
     const payload: KvTeamPayload = {
       teamId,
       teamName,
       samples,
       cachedAt: Date.now(),
-      lookbackDays: WINDOW_DAYS * NUM_WINDOWS,
+      lookbackDays: lookbackDaysTotal(),
+      incomplete,
     };
     await kv.put(`${KV_KEY_PREFIX}${teamId}`, JSON.stringify(payload), {
-      expirationTtl: KV_TTL_SECONDS,
+      expirationTtl: incomplete
+        ? KV_TTL_INCOMPLETE_SECONDS
+        : KV_TTL_COMPLETE_SECONDS,
     });
   } catch {
     // ignore KV write failures
@@ -331,6 +374,8 @@ function emptyCoverage(partial?: Partial<FormCoverage>): FormCoverage {
     teamsFromKv: 0,
     teamsFetched: 0,
     timedOut: false,
+    lookbackDays: lookbackDaysTotal(),
+    numWindows: NUM_WINDOWS,
     ...partial,
   };
 }
@@ -341,7 +386,7 @@ function emptyBundle(note: string, coverage?: FormCoverage): HistoricBundle {
     byTeamName: new Map(),
     leagueAvgGoals: 1.3,
     fetchedAt: Date.now(),
-    lookbackDays: WINDOW_DAYS * NUM_WINDOWS,
+    lookbackDays: lookbackDaysTotal(),
     matchCount: 0,
     ok: false,
     note,
@@ -424,13 +469,16 @@ export function getTeamForm(
 
 /**
  * Team-targeted historic form loader.
- * 1) Memory cache → 2) Cloudflare KV → 3) HKJC matchResult(teamId) in ~30d windows.
+ * 1) Memory cache → 2) Cloudflare KV → 3) HKJC matchResult(teamId) stacked windows.
+ * Incomplete (0–1 sample) cache hits are seeded but still deepened on network.
  */
-
-/** Ingest both sides of a historic match into byTeamId. */
 export async function loadHistoricForTeams(
   teams: TeamRef[],
-  opts?: { budgetMs?: number; priorityIds?: string[]; matchPairs?: Array<[string, string]> }
+  opts?: {
+    budgetMs?: number;
+    priorityIds?: string[];
+    matchPairs?: Array<[string, string]>;
+  }
 ): Promise<HistoricBundle> {
   const unique = new Map<string, string>();
   for (const t of teams) {
@@ -452,110 +500,132 @@ export async function loadHistoricForTeams(
   let teamsFromKv = 0;
   let teamsFetched = 0;
 
-  // 1) Memory
-  const needKv: string[] = [];
+  // Teams that need network deepen (0 or 1 samples, or missing)
+  const needDeepen = new Set<string>();
+
+  // 1) Memory — solid (≥2) hits within TTL skip network; thin seed + deepen
   for (const id of teamIds) {
     const mem = store.teamCache.get(id);
-    if (
-      mem &&
-      Date.now() < mem.cachedAt + MEMORY_TTL_MS &&
-      mem.samples.length
-    ) {
-      byTeamId.set(id, mem.samples);
-    } else {
-      needKv.push(id);
+    if (!mem) {
+      needDeepen.add(id);
+      continue;
     }
+    const n = mem.samples.length;
+    const age = Date.now() - mem.cachedAt;
+    if (n >= FAT_SAMPLE_SKIP && age < MEMORY_TTL_MS) {
+      byTeamId.set(id, mem.samples);
+      continue;
+    }
+    if (n >= 2 && age < MEMORY_TTL_MS) {
+      byTeamId.set(id, mem.samples);
+      continue;
+    }
+    if (n > 0 && age < MEMORY_TTL_INCOMPLETE_MS) {
+      byTeamId.set(id, mem.samples);
+      if (n < 2) needDeepen.add(id);
+      continue;
+    }
+    // Stale or empty memory — re-check KV / network
+    if (n > 0) byTeamId.set(id, mem.samples); // seed only
+    needDeepen.add(id);
   }
 
-  // 2) KV
-  const needNetwork: string[] = [];
+  // 2) KV for teams still needing deepen (or missing solid cache)
+  const needKv = [...needDeepen];
   if (kv && needKv.length) {
     await mapPool(needKv, Math.min(8, needKv.length), async (id) => {
-      const samples = await readTeamFromKv(kv, id);
-      if (samples && samples.length > 0) {
-        byTeamId.set(id, samples);
-        store.teamCache.set(id, { samples, cachedAt: Date.now() });
-        teamsFromKv++;
+      const payload = await readTeamFromKv(kv, id);
+      if (!payload) return;
+      const samples = payload.samples;
+      if (!samples.length) return;
+      teamsFromKv++;
+      const existing = byTeamId.get(id) || [];
+      const merged = dedupeSortTrim([...existing, ...samples]);
+      byTeamId.set(id, merged);
+      store.teamCache.set(id, { samples: merged, cachedAt: Date.now() });
+      if (merged.length >= 2 && !payload.incomplete) {
+        needDeepen.delete(id);
+      } else if (merged.length >= FAT_SAMPLE_SKIP) {
+        needDeepen.delete(id);
       } else {
-        needNetwork.push(id);
+        // Keep in needDeepen for older windows
+        needDeepen.add(id);
       }
     });
-  } else {
-    needNetwork.push(...needKv);
   }
 
-  // 3) Team-targeted: complete match pairs first (one strong side -> fetch the weak side)
+  // 3) Priority: 0-sample first, then 1-sample deepen, pair-boosted
   const sampleCount = (id: string) => byTeamId.get(id)?.length ?? 0;
-  const needs = (id: string) => sampleCount(id) < 2;
   const pairBoost = new Map<string, number>();
   for (const pair of opts?.matchPairs || []) {
     const [h, a] = pair;
     const hs = sampleCount(h);
     const as_ = sampleCount(a);
-    // One side ready → boost the weak side heavily
     if (hs >= 2 && as_ < 2) pairBoost.set(a, (pairBoost.get(a) || 0) + 10);
     else if (as_ >= 2 && hs < 2) pairBoost.set(h, (pairBoost.get(h) || 0) + 10);
     else if (hs < 2 && as_ < 2) {
-      // Both weak — mild boost so the pair stays adjacent
       pairBoost.set(h, (pairBoost.get(h) || 0) + 3);
       pairBoost.set(a, (pairBoost.get(a) || 0) + 3);
     }
   }
-  const toFetch = teamIds
-    .filter((id) => needs(id))
+
+  const toFetch = [...needDeepen]
+    .filter((id) => sampleCount(id) < FAT_SAMPLE_SKIP)
     .sort((a, b) => {
+      const sa = sampleCount(a);
+      const sb = sampleCount(b);
+      // Missing form (0) before thin (1) before anyone else
+      if (sa !== sb) return sa - sb;
       const ba = pairBoost.get(a) || 0;
       const bb = pairBoost.get(b) || 0;
       if (ba !== bb) return bb - ba;
-      // Prefer teams that already have 1 sample
-      return sampleCount(b) - sampleCount(a);
+      return 0;
     });
 
-  // Reserve last 4.5s for second-window fills of 1-sample teams
-  const firstWaveExceeded = () =>
-    Date.now() - started >= budgetMs - 4_500 || budgetExceeded();
-
-  if (toFetch.length && !firstWaveExceeded()) {
-    await mapPool(
-      toFetch,
-      CONCURRENCY,
-      async (id) => {
-        if (firstWaveExceeded()) return;
-        const name = unique.get(id) || id;
-        try {
-          const samples = await fetchTeamSamplesNetwork(id, {
-            budgetExceeded: firstWaveExceeded,
-            minSamples: 2,
-            windowIndex: 0,
-          });
-          teamsFetched++;
-          if (samples.length > 0) {
-            const merged = dedupeSortTrim([
-              ...(byTeamId.get(id) || []),
-              ...samples,
-            ]);
-            byTeamId.set(id, merged);
-            store.teamCache.set(id, { samples: merged, cachedAt: Date.now() });
-            if (kv) await writeTeamToKv(kv, id, name, merged);
-          } else if ((byTeamId.get(id)?.length ?? 0) === 0) {
-            store.teamCache.set(id, {
-              samples: [],
-              cachedAt: Date.now() - MEMORY_TTL_MS + 120_000,
-            });
-          }
-        } catch {
-          // ignore
-        }
-      },
-      firstWaveExceeded
-    );
+  /**
+   * Persist + merge network result for one team.
+   * startWindow: skip recent windows already covered by seed (approx: if
+   * already ≥1 sample, begin at window 1 to spend budget on older history).
+   */
+  async function deepenTeam(id: string): Promise<void> {
+    if (budgetExceeded()) return;
+    const name = unique.get(id) || id;
+    const seed = byTeamId.get(id) || [];
+    const startWindow = seed.length >= 1 ? 1 : 0;
+    try {
+      const samples = await fetchTeamSamplesNetwork(id, {
+        budgetExceeded,
+        minSamples: 2,
+        startWindow,
+        seed,
+      });
+      teamsFetched++;
+      const merged = dedupeSortTrim([...seed, ...samples]);
+      if (merged.length > 0) {
+        byTeamId.set(id, merged);
+        store.teamCache.set(id, { samples: merged, cachedAt: Date.now() });
+        if (kv) await writeTeamToKv(kv, id, name, merged);
+      } else if (seed.length === 0) {
+        // Negative cache briefly so we don't hammer empty teams
+        store.teamCache.set(id, {
+          samples: [],
+          cachedAt: Date.now() - MEMORY_TTL_MS + 90_000,
+        });
+        if (kv) await writeTeamToKv(kv, id, name, []);
+      }
+    } catch {
+      // ignore
+    }
   }
 
-  // 4) Second window (days 15-28) for teams stuck at exactly 1 sample —
-  // unlocks HAD when partner already has ≥2.
+  if (toFetch.length && !budgetExceeded()) {
+    await mapPool(toFetch, CONCURRENCY, deepenTeam, budgetExceeded);
+  }
+
+  // 4) Extra deepen pass for anyone still stuck at exactly 1 sample
   if (!budgetExceeded()) {
     const stuckAtOne = teamIds
-      .filter((id) => (byTeamId.get(id)?.length ?? 0) === 1)
+      .filter((id) => sampleCount(id) === 1)
       .sort((a, b) => (pairBoost.get(b) || 0) - (pairBoost.get(a) || 0));
     if (stuckAtOne.length) {
       await mapPool(
@@ -564,18 +634,18 @@ export async function loadHistoricForTeams(
         async (id) => {
           if (budgetExceeded()) return;
           const name = unique.get(id) || id;
+          const seed = byTeamId.get(id) || [];
           try {
+            // Start at window 2+ — window 0–1 likely already scanned
             const samples = await fetchTeamSamplesNetwork(id, {
               budgetExceeded,
               minSamples: 2,
-              windowIndex: 1,
+              startWindow: 2,
+              seed,
             });
             teamsFetched++;
-            if (samples.length > 0) {
-              const merged = dedupeSortTrim([
-                ...(byTeamId.get(id) || []),
-                ...samples,
-              ]);
+            if (samples.length > seed.length) {
+              const merged = dedupeSortTrim(samples);
               byTeamId.set(id, merged);
               store.teamCache.set(id, {
                 samples: merged,
@@ -618,7 +688,7 @@ export async function loadHistoricForTeams(
   const timedOut =
     budgetExceeded() && toFetch.length > 0 && teamsFetched < toFetch.length;
   const leagueAvgGoals = goalN > 0 ? goalSum / goalN : 1.3;
-  const lookbackDays = WINDOW_DAYS * NUM_WINDOWS;
+  const lookbackDays = lookbackDaysTotal();
 
   const coverage: FormCoverage = {
     teamsRequested: teamIds.length,
@@ -627,11 +697,13 @@ export async function loadHistoricForTeams(
     teamsFromKv,
     teamsFetched,
     timedOut,
+    lookbackDays,
+    numWindows: NUM_WINDOWS,
   };
 
   let note: string;
   if (teamsWithForm > 0) {
-    note = `Team historic: ${teamsWithForm}/${teamIds.length} teams with form (≥2: ${teamsWithAtLeast2}) · ~${lookbackDays}d · kv ${teamsFromKv} · fetched ${teamsFetched}${
+    note = `Team historic: ${teamsWithForm}/${teamIds.length} teams with form (≥2: ${teamsWithAtLeast2}) · ~${lookbackDays}d (${NUM_WINDOWS}×${WINDOW_DAYS}d) · kv ${teamsFromKv} · fetched ${teamsFetched}${
       timedOut ? " · partial (budget)" : ""
     }`;
   } else if (timedOut) {
