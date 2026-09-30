@@ -28,7 +28,7 @@ const KV_TTL_TEAM = 12 * 60 * 60;
 const KV_TTL_CSV = 18 * 60 * 60;
 const MAX_SAMPLES = 12;
 const FETCH_TIMEOUT_MS = 5_000;
-const ENRICH_BUDGET_MS = 8_000;
+const ENRICH_BUDGET_MS = 12_000;
 const CONCURRENCY = 3;
 
 export type ExtTeamRef = TeamRef & {
@@ -106,7 +106,7 @@ const FOTMOB_LEAGUE_MAP: Record<string, number[]> = {
 /** League payloads that are too large to JSON-parse on Workers cold path. */
 const HUGE_FOTMOB_LEAGUES = new Set([130, 8972, 161, 114]); // MLS, USL, Uruguay, Friendlies
 /** FotMob league dumps are too large for Free-plan Worker CPU (JSON parse → 1102). */
-const USE_FOTMOB_LEAGUES = true;
+const USE_FOTMOB_LEAGUES = false;
 /** Allow-list of small FotMob league payloads safe on Free Worker CPU. */
 const SMALL_FOTMOB_LEAGUES = new Set([
   9821, // CONCACAF NL ~74
@@ -908,6 +908,31 @@ export async function enrichHistoricWithExternal(
   }
   const teamList = [...unique.values()];
 
+  // --- 0) EARLY TheSportsDB for zero-sample teams (Free Worker safe) ---
+  {
+    const zero = teamList
+      .filter((t) => (bundle.byTeamId.get(t.id)?.length ?? 0) < 1)
+      .slice(0, 16);
+    if (zero.length) {
+      await mapPool(zero, 3, async (team) => {
+        try {
+          const extra = await loadTheSportsDbTeam(team.name, kv);
+          if (!extra.length) return;
+          sourcesUsed.add("thesportsdb");
+          stats.thesportsdb++;
+          const merged = mergeSamples(bundle.byTeamId.get(team.id), extra);
+          bundle.byTeamId.set(team.id, merged);
+          const nk = team.name.trim().toLowerCase();
+          if (nk) bundle.byTeamName.set(nk, merged);
+          stats.teamsEnriched++;
+          stats.teamsTouched++;
+        } catch {
+          // ignore
+        }
+      });
+    }
+  }
+
   // Prioritize thin / missing form
   const thin = teamList
     .map((t) => ({
@@ -1033,13 +1058,13 @@ export async function enrichHistoricWithExternal(
       const nb = bundle.byTeamId.get(b.team.id)?.length ?? 0;
       return na - nb;
     })
-    .slice(0, 14);
-  if (!budgetExceeded() && stillThin.length) {
+    .slice(0, 18);
+  // Always attempt TheSportsDB for thin sides (primary Free-plan path).
+  if (stillThin.length) {
     await mapPool(
       stillThin,
       CONCURRENCY,
       async ({ team }) => {
-        if (budgetExceeded()) return;
         try {
           const extra = await loadTheSportsDbTeam(team.name, kv);
           if (!extra.length) return;
@@ -1054,8 +1079,8 @@ export async function enrichHistoricWithExternal(
         } catch {
           // ignore
         }
-      },
-      budgetExceeded
+      }
+      // no budgetExceeded stop — finish this small TSDB batch
     );
   }
 
