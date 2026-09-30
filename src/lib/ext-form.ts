@@ -27,9 +27,9 @@ const KV_TTL_LEAGUE = 6 * 60 * 60; // 6h
 const KV_TTL_TEAM = 12 * 60 * 60;
 const KV_TTL_CSV = 18 * 60 * 60;
 const MAX_SAMPLES = 12;
-const FETCH_TIMEOUT_MS = 8_000;
-const ENRICH_BUDGET_MS = 14_000;
-const CONCURRENCY = 6;
+const FETCH_TIMEOUT_MS = 5_000;
+const ENRICH_BUDGET_MS = 8_000;
+const CONCURRENCY = 4;
 
 export type ExtTeamRef = TeamRef & {
   league?: string;
@@ -382,8 +382,25 @@ async function loadFotmobLeague(
       return true;
     return false;
   });
-  await kvPut(kv, key, JSON.stringify(finished), KV_TTL_LEAGUE);
-  return finished;
+  // Compact + cap to newest ~48 finished — cuts Worker CPU/KV size
+  const compact: FotmobMatch[] = finished
+    .slice(-48)
+    .map((m) => ({
+      id: m.id,
+      home: m.home
+        ? { id: m.home.id, name: m.home.name, score: m.home.score }
+        : undefined,
+      away: m.away
+        ? { id: m.away.id, name: m.away.name, score: m.away.score }
+        : undefined,
+      status: {
+        finished: m.status?.finished,
+        utcTime: m.status?.utcTime,
+        scoreStr: m.status?.scoreStr,
+      },
+    }));
+  await kvPut(kv, key, JSON.stringify(compact), KV_TTL_LEAGUE);
+  return compact;
 }
 
 /** Parse football-data.co.uk CSV — goals + HC/AC only (skip all odds columns). */
@@ -881,17 +898,22 @@ export async function enrichHistoricWithExternal(
     .sort((a, b) => a.n - b.n);
 
   // --- 1) FotMob league batch (covers many thin internationals at once) ---
-  const leagueIds = new Set<number>();
-  for (const { team } of thin) {
+  // Rank leagues by how many *thin* teams map to them; fetch top few only.
+  const leagueDemand = new Map<number, number>();
+  for (const { team, n } of thin) {
+    if (n >= 2) continue;
     for (const id of resolveFotmobLeagueIds(team.leagueCode, team.league)) {
-      leagueIds.add(id);
+      leagueDemand.set(id, (leagueDemand.get(id) || 0) + 1);
     }
   }
   const fotmobIndex: TeamIndex = new Map();
-  const leagueIdList = [...leagueIds].slice(0, 12);
+  const leagueIdList = [...leagueDemand.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([id]) => id)
+    .slice(0, 5);
   await mapPool(
     leagueIdList,
-    4,
+    2,
     async (lid) => {
       if (budgetExceeded()) return;
       const matches = await loadFotmobLeague(lid, kv);
@@ -920,11 +942,14 @@ export async function enrichHistoricWithExternal(
   }
 
   // --- 2) football-data.co.uk CSVs (real corners for major clubs) ---
-  if (!budgetExceeded()) {
+  const thinAfterFotmob = thin.filter(
+    ({ team }) => (bundle.byTeamId.get(team.id)?.length ?? 0) < 2
+  ).length;
+  if (!budgetExceeded() && thinAfterFotmob >= 4) {
     const csvIndex: TeamIndex = new Map();
     await mapPool(
-      FD_CSV_DIVS.slice(0, 8),
-      3,
+      FD_CSV_DIVS.slice(0, 4),
+      2,
       async (div) => {
         if (budgetExceeded()) return;
         const idx = await loadFdCsvDiv(div, kv);
@@ -951,8 +976,13 @@ export async function enrichHistoricWithExternal(
     }
   }
 
-  // --- 3) OpenLigaDB (German) ---
-  if (!budgetExceeded()) {
+  // --- 3) OpenLigaDB (German) — only if a thin name looks DE ---
+  const maybeDe = thin.some(({ team }) =>
+    /bayern|dortmund|leverkusen|frankfurt|wolfsburg|stuttgart|freiburg|bremen|gladbach|leipzig|hoffenheim|koln|hamburg|st Pauli|mainz|augsburg|heidenheim|bochum|union berlin/i.test(
+      team.name
+    )
+  );
+  if (!budgetExceeded() && maybeDe) {
     try {
       const ol = await loadOpenLigaBl(kv);
       if (ol.size) {
@@ -974,8 +1004,8 @@ export async function enrichHistoricWithExternal(
 
   // --- 4) TheSportsDB for still-thin teams (1 last event — better than 0) ---
   const stillThin = thin
-    .filter(({ team }) => (bundle.byTeamId.get(team.id)?.length ?? 0) < 2)
-    .slice(0, 24);
+    .filter(({ team }) => (bundle.byTeamId.get(team.id)?.length ?? 0) < 1)
+    .slice(0, 8);
   if (!budgetExceeded() && stillThin.length) {
     await mapPool(
       stillThin,

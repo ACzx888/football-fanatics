@@ -183,19 +183,26 @@ export async function fetchMatchesPayload(): Promise<MatchesApiResponse> {
       // Soften HKJC budget slightly so external enricher gets wall time
       historic = await loadHistoricForTeams(teamRefs as TeamRef[], {
         matchPairs,
-        budgetMs: 16_000,
+        budgetMs: 10_000,
       });
     } catch {
       historic = null;
     }
     if (historic) {
       try {
-        const enriched = await enrichHistoricWithExternal(historic, teamRefs, {
-          budgetMs: 14_000,
+        const enrichPromise = enrichHistoricWithExternal(historic, teamRefs, {
+          budgetMs: 7_000,
         });
-        historic = enriched.bundle;
-        extEnriched = enriched.stats.teamsEnriched;
-        extSources = enriched.stats.sourcesUsed;
+        // Hard cap so Worker never hits CPU 1102 on cold multi-source fetch
+        const enriched = await Promise.race([
+          enrichPromise,
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 7500)),
+        ]);
+        if (enriched) {
+          historic = enriched.bundle;
+          extEnriched = enriched.stats.teamsEnriched;
+          extSources = enriched.stats.sourcesUsed;
+        }
       } catch {
         // keep HKJC-only historic
       }
