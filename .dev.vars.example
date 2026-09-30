@@ -1,1 +1,5 @@
 NEXTJS_ENV=development
+# Optional — free token from https://www.football-data.org/client/register
+# FOOTBALL_DATA_API_KEY=
+# Optional — free tier from https://www.api-football.com/
+# API_FOOTBALL_KEY=

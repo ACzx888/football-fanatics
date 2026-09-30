@@ -36,6 +36,30 @@ function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
 }
 
+
+function withFormSources(
+  sources: PredictionSource[],
+  formSources?: PredictionSource[]
+): PredictionSource[] {
+  const out = new Set<PredictionSource>(sources);
+  for (const s of formSources || []) {
+    if (
+      s === "hkjc" ||
+      s === "football-data" ||
+      s === "football-data-org" ||
+      s === "api-football" ||
+      s === "fotmob" ||
+      s === "thesportsdb" ||
+      s === "openligadb" ||
+      s === "understat" ||
+      s === "form"
+    ) {
+      out.add(s);
+    }
+  }
+  return [...out];
+}
+
 function insufficient(reason: string): PredictionOutcome {
   return {
     available: false,
@@ -88,6 +112,8 @@ export interface PredictionContext {
   /** Unused for forecast math — Actual live stats stay on the match, not the model. */
   live?: LiveResult | null;
   historicOk?: boolean;
+  /** Honest provenance chips from HKJC ∪ external enrichers. */
+  formSources?: PredictionSource[];
 }
 
 type LambdaEstimate = {
@@ -275,8 +301,9 @@ function hadPrediction(
     modelPct: roundPct(e.pct),
   }));
 
-  const sources: PredictionSource[] = ["xG", "form"];
+  let sources: PredictionSource[] = ["xG", "form"];
   if (factors.some((f) => f.startsWith("tempo"))) sources.push("tempo");
+  sources = withFormSources(sources, ctx.formSources);
 
   return {
     available: true,
@@ -332,7 +359,7 @@ function teamGoalsPrediction(
     expectedValue: exp,
     line: null,
     modelProb: null,
-    sources: ["xG", "form"],
+    sources: withFormSources(["xG", "form"], ctx.formSources),
     factors,
     detail: [
       `${sideLabel} λ=${exp} · scoreline ${scoreline}`,
@@ -465,7 +492,7 @@ function totalCornersPrediction(
     expectedValue: exp,
     line: null,
     modelProb: null,
-    sources: [...new Set(sources)],
+    sources: withFormSources([...new Set(sources)], ctx.formSources),
     factors,
     detail: detailParts.join(" · "),
   };
@@ -565,7 +592,7 @@ function teamCornersPrediction(
     expectedValue: exp,
     line: null,
     modelProb: null,
-    sources: [...new Set(sources)],
+    sources: withFormSources([...new Set(sources)], ctx.formSources),
     factors,
     detail: `Fundamental ${sideLabel} corner projection · no CHH/CHA odds`,
   };

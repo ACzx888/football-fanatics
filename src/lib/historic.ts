@@ -17,6 +17,8 @@ export interface TeamMatchSample {
   totalCorners: number | null;
   opponentId: string;
   opponentName: string;
+  /** Provenance when sample came from an external enricher. */
+  source?: import("./types").PredictionSource;
 }
 
 export interface TeamForm {

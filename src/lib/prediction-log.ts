@@ -37,7 +37,7 @@ export interface StoredCornerPrediction {
   label?: string;
   detail?: string;
   factors?: string[];
-  sources?: Array<"form" | "xG" | "inplay" | "tempo" | "goals-proxy" | "tempo-proxy">;
+  sources?: import("./types").PredictionSource[];
 }
 
 export interface PredictionRecord {

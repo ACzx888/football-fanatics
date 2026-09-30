@@ -11,7 +11,21 @@ export type MatchStatus =
   | string;
 
 /** Prediction provenance — fundamental only (never odds/market). */
-export type PredictionSource = "form" | "xG" | "inplay" | "tempo" | "goals-proxy" | "tempo-proxy";
+export type PredictionSource =
+  | "form"
+  | "xG"
+  | "inplay"
+  | "tempo"
+  | "goals-proxy"
+  | "tempo-proxy"
+  | "hkjc"
+  | "football-data"
+  | "football-data-org"
+  | "api-football"
+  | "fotmob"
+  | "thesportsdb"
+  | "openligadb"
+  | "understat";
 
 export interface ModelSelection {
   code: string;
@@ -103,5 +117,7 @@ export interface MatchesApiResponse {
     timedOut?: boolean;
     lookbackDays?: number;
     numWindows?: number;
+    extEnriched?: number;
+    extSources?: string[];
   } | null;
 }

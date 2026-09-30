@@ -1,4 +1,43 @@
-import type { MatchPredictions, PredictionOutcome } from "@/lib/types";
+import type {
+  MatchPredictions,
+  PredictionOutcome,
+  PredictionSource,
+} from "@/lib/types";
+
+const SOURCE_LABEL: Record<PredictionSource, string> = {
+  form: "form",
+  xG: "xG",
+  inplay: "inplay",
+  tempo: "tempo",
+  "goals-proxy": "goals-proxy",
+  "tempo-proxy": "tempo-proxy",
+  hkjc: "hkjc",
+  "football-data": "football-data",
+  "football-data-org": "football-data-org",
+  "api-football": "api-football",
+  fotmob: "fotmob",
+  thesportsdb: "thesportsdb",
+  openligadb: "openligadb",
+  understat: "understat",
+};
+
+function SourceChips({ sources }: { sources?: PredictionSource[] }) {
+  if (!sources?.length) return null;
+  const uniq = [...new Set(sources)];
+  return (
+    <div className="mt-1.5 flex flex-wrap gap-1">
+      {uniq.map((s) => (
+        <span
+          key={s}
+          className="rounded-md border border-emerald-800/60 bg-emerald-950/40 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300/90"
+          title={`Data source: ${SOURCE_LABEL[s] || s}`}
+        >
+          {SOURCE_LABEL[s] || s}
+        </span>
+      ))}
+    </div>
+  );
+}
 
 function FactorChips({ factors }: { factors?: string[] }) {
   if (!factors?.length) return null;
@@ -68,6 +107,7 @@ function Cell({
           model {outcome.modelProb.toFixed(0)}%
         </p>
       )}
+      <SourceChips sources={outcome.sources} />
       <FactorChips factors={outcome.factors} />
       {outcome.selections && outcome.selections.length > 0 && (
         <div className="mt-2 space-y-1">

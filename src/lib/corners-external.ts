@@ -1,12 +1,13 @@
 /**
  * Optional external fundamental corner form (never odds).
  *
- * When FOOTBALL_DATA_API_KEY or API_FOOTBALL_KEY is bound on the Worker,
- * we may enrich team corner averages from public sports APIs.
- * Without a key (current deploy), this module is a no-op and predictions
- * fall back to the labeled goals/tempo proxy in corner-model.ts.
+ * Prefer real corner averages from:
+ *  - football-data.co.uk CSV HC+AC (via ext-form enricher → TeamMatchSample.totalCorners)
+ *  - api-football statistics when API_FOOTBALL_KEY is set
+ *  - Settled live HKJC totals written back via putExternalCornerForm
  *
- * Cached under HISTORIC_CACHE with versioned keys: cornerform:v1:{teamKey}
+ * Cached under HISTORIC_CACHE: cornerform:v1:{teamKey}
+ * Without a key, this module still serves KV hits + league base constant.
  */
 
 import { getCloudflareContext } from "@opennextjs/cloudflare";
@@ -81,7 +82,8 @@ export async function getLeagueCornerBase(): Promise<number> {
 
 /**
  * Look up cached external corner form for a team name.
- * Returns null when no API key / no cache hit — caller uses goals-proxy.
+ * When API_FOOTBALL_KEY is present and cache miss, attempt last-fixture
+ * statistics corners (best-effort; swallow errors).
  */
 export async function getExternalCornerForm(
   teamName: string
@@ -106,15 +108,89 @@ export async function getExternalCornerForm(
     }
   }
 
-  // No free corner endpoint without a vendor key. football-data.org free
-  // match payloads omit corners; api-football requires API_FOOTBALL_KEY.
-  // When a key appears later, fetch + put under KV_PREFIX here.
-  const hasKey = !!(env.FOOTBALL_DATA_API_KEY || env.API_FOOTBALL_KEY);
-  if (!hasKey) return null;
+  const apiKey = env.API_FOOTBALL_KEY;
+  if (!apiKey) return null;
 
-  // Key present but connector not implemented for corners yet — stay honest.
-  void hasKey;
-  return null;
+  // Best-effort: search team → last fixtures → statistics corners average
+  try {
+    const searchRes = await fetch(
+      `https://v3.football.api-sports.io/teams?search=${encodeURIComponent(teamName)}`,
+      {
+        headers: { "x-apisports-key": apiKey },
+        signal: AbortSignal.timeout(6000),
+      }
+    );
+    if (!searchRes.ok) return null;
+    const search = (await searchRes.json()) as {
+      response?: Array<{ team?: { id?: number; name?: string } }>;
+    };
+    const teamId = search.response?.[0]?.team?.id;
+    if (!teamId) return null;
+
+    const fixRes = await fetch(
+      `https://v3.football.api-sports.io/fixtures?team=${teamId}&last=5`,
+      {
+        headers: { "x-apisports-key": apiKey },
+        signal: AbortSignal.timeout(6000),
+      }
+    );
+    if (!fixRes.ok) return null;
+    const fix = (await fixRes.json()) as {
+      response?: Array<{ fixture?: { id?: number } }>;
+    };
+    const ids = (fix.response || [])
+      .map((r) => r.fixture?.id)
+      .filter((x): x is number => typeof x === "number")
+      .slice(0, 3);
+
+    const totals: number[] = [];
+    for (const fid of ids) {
+      const stRes = await fetch(
+        `https://v3.football.api-sports.io/fixtures/statistics?fixture=${fid}`,
+        {
+          headers: { "x-apisports-key": apiKey },
+          signal: AbortSignal.timeout(6000),
+        }
+      );
+      if (!stRes.ok) continue;
+      const st = (await stRes.json()) as {
+        response?: Array<{
+          statistics?: Array<{ type?: string; value?: number | string | null }>;
+        }>;
+      };
+      let sum = 0;
+      let hit = 0;
+      for (const side of st.response || []) {
+        for (const row of side.statistics || []) {
+          if ((row.type || "").toLowerCase() === "corner kicks") {
+            const v = Number(row.value);
+            if (Number.isFinite(v) && v >= 0) {
+              sum += v;
+              hit++;
+            }
+          }
+        }
+      }
+      if (hit >= 2) totals.push(sum);
+    }
+    if (!totals.length) return null;
+    const avg = totals.reduce((a, b) => a + b, 0) / totals.length;
+    const payload: ExternalCornerForm = {
+      teamKey: key,
+      avgTotalCorners: avg,
+      sampleN: totals.length,
+      source: "api-football",
+      cachedAt: Date.now(),
+    };
+    if (kv) {
+      await kv.put(`${KV_PREFIX}${key}`, JSON.stringify(payload), {
+        expirationTtl: KV_TTL_SECONDS,
+      });
+    }
+    return payload;
+  } catch {
+    return null;
+  }
 }
 
 /** Persist a measured team corner average (e.g. from settled live results). */

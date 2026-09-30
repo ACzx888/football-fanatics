@@ -75,19 +75,40 @@ npm run preview
 
 ## How predictions work
 
-1. **Historic form** — last ~28 days of completed matches via `searchHistoricFootballMatches`, cached in-process (~20 min TTL). Per team: last ≤12 results → PPG, home/away scoring rates, form score.
-2. **HAD** — Poisson from attack/defence rates (home/away adjusted). Pick H/D/A from model probs. Requires ≥3 recent games each side; otherwise **Insufficient Data**. Confidence from sample size, rate stability, and separation between top outcomes (capped ~82%) — **not** from market.
-3. **Corners** — prefer historic averages when HKJC provides `ttlCornerResult` (≥0). When historic corners are missing (common: often `-1`) but HAD form exists, use a labeled **goals-proxy / tempo-proxy** from Poisson λ and attack tempo (empirical ~10.2 base corners, scaled by combined xG) — never odds, never called “historic corners”, lower confidence. Settled live corner totals are written back into teamform KV to grow real corner history over time.
-4. Never invent high-confidence numbers when data is missing — show **Insufficient Data**.
+1. **Historic form (HKJC)** — team-targeted `searchHistoricFootballMatches` stacked ~14d windows (~84d), KV `teamform:v2:*`. Per team: last ≤12 results → PPG, home/away scoring rates, form score.
+2. **External form enricher** (`src/lib/ext-form.ts`) — fills thin/missing HKJC form from public sources (never odds):
+   - **FotMob** league fixtures (keyless JSON) — primary for internationals / cups / USL / MLS / women’s / U21
+   - **football-data.co.uk** season CSVs (keyless) — goals + **real HC/AC corners** for major EU leagues
+   - **TheSportsDB** free search + last event (keyless, thin but unlocks 1-sample sides)
+   - **OpenLigaDB** (DE Bundesliga, keyless)
+   - **football-data.org v4** when `FOOTBALL_DATA_API_KEY` is set
+   - **api-football** when `API_FOOTBALL_KEY` is set (also corner statistics path)
+   - Team matching: fuzzy English name + alias table + HKJC tournament code → league map; KV `extform:v1:*`
+3. **HAD / team scores** — Poisson from attack/defence rates. Soft gate ≥1 sample each side (prefer ≥2). Confidence from sample size / stability / separation — **not** market.
+4. **Corners** — prefer real totals on samples (HKJC `ttlCornerResult`, CSV HC+AC, api-football stats). Else labeled **goals-proxy / tempo-proxy** from λ (never called “historic corners”).
+5. UI shows honest **source chips** (`hkjc` / `fotmob` / `football-data` / `goals-proxy` / …). Forecast lock after first write is unchanged.
+6. Never invent high-confidence numbers when data is missing — show **Insufficient Data**.
 
 Analysis is for entertainment only — **not betting advice**.
+
+## Optional API secrets (max coverage)
+
+Keyless sources ship by default. For broader club coverage / real corner stats:
+
+```bash
+npx wrangler secret put FOOTBALL_DATA_API_KEY   # free: https://www.football-data.org/client/register
+npx wrangler secret put API_FOOTBALL_KEY        # free tier: https://www.api-football.com/
+```
+
+Local: copy `.dev.vars.example` → `.dev.vars` and fill values. Bindings are declared in `cloudflare-env.d.ts`.
 
 ## Limitations
 
 - HKJC `startDate`/`endDate` on *live* matches often error; filtering is done locally by kickoff HKT date.
-- Historic lookback is capped for latency (~15–20s cold cache); sparse leagues may lack form.
+- Historic + external enrich share a Workers time budget; cold requests may be partial (warm KV improves coverage).
 - Match minute is estimated from kickoff + status; HKJC payloads here do not expose an official clock.
-- Historic corner totals are generally unavailable from the search API (`ttlCornerResult` typically `-1`) — pre-match corners then use the labeled goals/tempo proxy whenever HAD form is available. Optional `API_FOOTBALL_KEY` / `FOOTBALL_DATA_API_KEY` hooks exist for future external corner form (KV `cornerform:v1:*`); no key is configured in the current deploy.
+- Obscure cups / AM / friendlies may still be unmatched after fuzzy aliasing — we stay honest with **Insufficient Data**.
+- CSV / FotMob unofficial JSON can change shape; enricher degrades gracefully per source.
 
 ## Disclaimer
 

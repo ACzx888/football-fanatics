@@ -6,11 +6,16 @@ import {
   type TeamRef,
 } from "./historic";
 import {
+  enrichHistoricWithExternal,
+  teamFormSources,
+  type ExtTeamRef,
+} from "./ext-form";
+import {
   fetchLiveFootballMatches,
   type RawLiveMatch,
 } from "./hkjc-graphql";
 import { buildPredictions } from "./predictions";
-import type { FootballMatch, MatchesApiResponse } from "./types";
+import type { FootballMatch, MatchesApiResponse, PredictionSource } from "./types";
 import {
   addDaysHkt,
   estimateMinuteLabel,
@@ -43,6 +48,14 @@ function normalizeMatch(
     ? getTeamForm(historic, awayTeamId, awayTeam)
     : null;
 
+  const formSources: PredictionSource[] = [];
+  if (historic) {
+    formSources.push(
+      ...teamFormSources(historic, homeTeamId, homeTeam),
+      ...teamFormSources(historic, awayTeamId, awayTeam)
+    );
+  }
+
   const rr = raw.runningResult;
   const live =
     rr &&
@@ -64,12 +77,12 @@ function normalizeMatch(
   const minuteLabel = estimateMinuteLabel(raw.kickOffTime, status, now);
 
   // Forecasts are fundamental/historic only — never live minute/score/corners.
-  // Actual live stats stay on the match for InPlayPanel display.
   const predictions = buildPredictions({
     homeForm,
     awayForm,
     leagueAvgGoals: historic?.leagueAvgGoals ?? 1.3,
     historicOk: !!(historic?.ok && (homeForm || awayForm)),
+    formSources: [...new Set(formSources)],
   });
 
   return {
@@ -94,7 +107,6 @@ function normalizeMatch(
   };
 }
 
-
 function collectMatchPairs(
   rawMatches: RawLiveMatch[],
   today: string,
@@ -110,29 +122,38 @@ function collectMatchPairs(
   return pairs;
 }
 
-function collectTeamRefs(rawMatches: RawLiveMatch[], today: string, tomorrow: string): TeamRef[] {
-  const map = new Map<string, string>();
+function collectTeamRefs(
+  rawMatches: RawLiveMatch[],
+  today: string,
+  tomorrow: string
+): ExtTeamRef[] {
+  const map = new Map<string, ExtTeamRef>();
   const order: string[] = [];
   for (const raw of rawMatches) {
     if (!raw.kickOffTime) continue;
     const day = hktDateFromIso(raw.kickOffTime);
     if (day !== today && day !== tomorrow) continue;
-    // Interleave home/away so pair fetches stay adjacent under a budget cut-off
+    const league = raw.tournament?.name_en || "";
+    const leagueCode = raw.tournament?.code || "";
     for (const team of [raw.homeTeam, raw.awayTeam]) {
       if (!team?.id) continue;
       if (!map.has(team.id)) {
-        map.set(team.id, team.name_en || team.id);
+        map.set(team.id, {
+          id: team.id,
+          name: team.name_en || team.id,
+          league,
+          leagueCode,
+        });
         order.push(team.id);
       }
     }
   }
-  return order.map((id) => ({ id, name: map.get(id)! }));
+  return order.map((id) => map.get(id)!);
 }
 
 /**
  * Fetch live HKJC matches via Workers-safe native GraphQL, then enrich with
- * team-targeted historic form (KV-cached). Prefer live matches (even with
- * Incomplete Data) over demo fixtures whenever the filtered list is non-empty.
+ * team-targeted historic form (KV-cached) + external public form sources.
  */
 export async function fetchMatchesPayload(): Promise<MatchesApiResponse> {
   const now = new Date();
@@ -144,7 +165,6 @@ export async function fetchMatchesPayload(): Promise<MatchesApiResponse> {
   let liveError: string | null = null;
 
   try {
-    // Empty oddsTypes → foPools empty; whitelist still satisfied.
     rawMatches = await fetchLiveFootballMatches([]);
   } catch (err) {
     liveError =
@@ -156,13 +176,29 @@ export async function fetchMatchesPayload(): Promise<MatchesApiResponse> {
   const matchPairs = collectMatchPairs(rawMatches, today, tomorrow);
 
   let historic: HistoricBundle | null = null;
+  let extEnriched = 0;
+  let extSources: string[] = [];
   if (teamRefs.length > 0) {
     try {
-      historic = await loadHistoricForTeams(teamRefs, {
+      // Soften HKJC budget slightly so external enricher gets wall time
+      historic = await loadHistoricForTeams(teamRefs as TeamRef[], {
         matchPairs,
+        budgetMs: 16_000,
       });
     } catch {
       historic = null;
+    }
+    if (historic) {
+      try {
+        const enriched = await enrichHistoricWithExternal(historic, teamRefs, {
+          budgetMs: 14_000,
+        });
+        historic = enriched.bundle;
+        extEnriched = enriched.stats.teamsEnriched;
+        extSources = enriched.stats.sourcesUsed;
+      } catch {
+        // keep HKJC-only historic
+      }
     }
   }
 
@@ -186,6 +222,8 @@ export async function fetchMatchesPayload(): Promise<MatchesApiResponse> {
         timedOut: historic.formCoverage.timedOut,
         lookbackDays: historic.formCoverage.lookbackDays,
         numWindows: historic.formCoverage.numWindows,
+        extEnriched,
+        extSources,
       }
     : null;
 
@@ -207,7 +245,6 @@ export async function fetchMatchesPayload(): Promise<MatchesApiResponse> {
     };
   }
 
-  // No today/tomorrow matches after filter — only then fall back to demo.
   const demo = buildDemoMatches(now);
   const filterNote =
     rawMatchCount > 0
