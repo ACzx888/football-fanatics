@@ -501,7 +501,7 @@ export async function warmOpenLiga(): Promise<{ ok: boolean; teams: number }> {
   const env = await getEnv();
   const kv = env?.HISTORIC_CACHE;
   const year = new Date().getUTCFullYear();
-  let text =
+  const text =
     (await fetchText(`https://api.openligadb.de/getmatchdata/bl1/${year}`)) ||
     (await fetchText(`https://api.openligadb.de/getmatchdata/bl1/${year - 1}`));
   if (!text) return { ok: false, teams: 0 };
