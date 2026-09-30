@@ -69,7 +69,7 @@ type ExtSample = TeamMatchSample & { source?: PredictionSource };
 /** HKJC tournament code / name → FotMob league id(s) to try. */
 const FOTMOB_LEAGUE_MAP: Record<string, number[]> = {
   CNL: [9821],
-  E2Q: [10437, 288],
+  E2Q: [288, 10437],
   UCLW: [9375],
   UECW: [11129],
   ANQ: [10608, 289],
@@ -106,20 +106,26 @@ const FOTMOB_LEAGUE_MAP: Record<string, number[]> = {
 /** League payloads that are too large to JSON-parse on Workers cold path. */
 const HUGE_FOTMOB_LEAGUES = new Set([130, 8972, 161, 114]); // MLS, USL, Uruguay, Friendlies
 /** FotMob league dumps are too large for Free-plan Worker CPU (JSON parse → 1102). */
-const USE_FOTMOB_LEAGUES = false;
+const USE_FOTMOB_LEAGUES = true;
 /** Allow-list of small FotMob league payloads safe on Free Worker CPU. */
 const SMALL_FOTMOB_LEAGUES = new Set([
-  9821, // CONCACAF NL ~74
-  9375, // WCL ~54
-  11129, // Women Europa ~56
-  9833, // Asian Games ~27
-  9717, // Women League Cup ~69
-  329, // Gulf Cup ~15
-  11027, // UAE League Cup ~21
-  9091, // Copa Chile — borderline, keep
-  10342, // Copa Uruguay ~31
-  10608, // AFCON Qual — 156, skip via not listing? include carefully
+  329, // Gulf Cup
+  11027, // UAE League Cup
+  10342, // Copa Uruguay
+  9833, // Asian Games
+  9375, // Women's CL
+  9717, // Women's League Cup
+  11129, // Women's Europa Cup
+  9091, // Copa Chile
+  9821, // CONCACAF Nations League
+  288, // EURO U21
+  10437, // EURO U21 Qual (may abort if too large)
+  10608, // AFCON Qual
+  114, // Friendlies
+  9227, // WSL
 ]);
+/** Skip FotMob bodies larger than this (Free Worker CPU guard). */
+const FOTMOB_MAX_BYTES = 560_000;
 
 const FD_CSV_DIVS = [
   "E0",
@@ -383,11 +389,28 @@ async function loadFotmobLeague(
       // fall through
     }
   }
-  const data = await fetchJson<{
+  const rawText = await fetchText(
+    `https://www.fotmob.com/api/data/leagues?id=${leagueId}`,
+    { timeoutMs: 10_000 }
+  );
+  if (!rawText) return [];
+  if (rawText.length > FOTMOB_MAX_BYTES) {
+    // Too large for Free Worker JSON parse — skip (caller may use other sources)
+    return [];
+  }
+  type FotmobLeaguePayload = {
     fixtures?: { allMatches?: FotmobMatch[] };
-    overview?: { leagueOverviewMatches?: FotmobMatch[]; matches?: { allMatches?: FotmobMatch[] } };
-  }>(`https://www.fotmob.com/api/data/leagues?id=${leagueId}`);
-  if (!data) return [];
+    overview?: {
+      leagueOverviewMatches?: FotmobMatch[];
+      matches?: { allMatches?: FotmobMatch[] };
+    };
+  };
+  let data: FotmobLeaguePayload;
+  try {
+    data = JSON.parse(rawText) as FotmobLeaguePayload;
+  } catch {
+    return [];
+  }
   const matches =
     data.fixtures?.allMatches ||
     data.overview?.matches?.allMatches ||
@@ -908,31 +931,6 @@ export async function enrichHistoricWithExternal(
   }
   const teamList = [...unique.values()];
 
-  // --- 0) EARLY TheSportsDB for zero-sample teams (Free Worker safe) ---
-  {
-    const zero = teamList
-      .filter((t) => (bundle.byTeamId.get(t.id)?.length ?? 0) < 1)
-      .slice(0, 16);
-    if (zero.length) {
-      await mapPool(zero, 3, async (team) => {
-        try {
-          const extra = await loadTheSportsDbTeam(team.name, kv);
-          if (!extra.length) return;
-          sourcesUsed.add("thesportsdb");
-          stats.thesportsdb++;
-          const merged = mergeSamples(bundle.byTeamId.get(team.id), extra);
-          bundle.byTeamId.set(team.id, merged);
-          const nk = team.name.trim().toLowerCase();
-          if (nk) bundle.byTeamName.set(nk, merged);
-          stats.teamsEnriched++;
-          stats.teamsTouched++;
-        } catch {
-          // ignore
-        }
-      });
-    }
-  }
-
   // Prioritize thin / missing form
   const thin = teamList
     .map((t) => ({
@@ -951,11 +949,28 @@ export async function enrichHistoricWithExternal(
     }
   }
   const fotmobIndex: TeamIndex = new Map();
+  // Prefer smaller payloads first (Free Worker CPU), then demand.
+  const FOTMOB_SIZE_RANK: Record<number, number> = {
+    329: 1,
+    11027: 2,
+    10342: 3,
+    9833: 4,
+    9375: 5,
+    9717: 6,
+    11129: 7,
+    9091: 8,
+    9821: 9,
+  };
   const leagueIdList = USE_FOTMOB_LEAGUES
     ? [...leagueDemand.entries()]
-        .sort((a, b) => b[1] - a[1])
+        .filter(([id]) => SMALL_FOTMOB_LEAGUES.has(id))
+        .sort((a, b) => {
+          const sa = FOTMOB_SIZE_RANK[a[0]] ?? 99;
+          const sb = FOTMOB_SIZE_RANK[b[0]] ?? 99;
+          if (sa !== sb) return sa - sb;
+          return b[1] - a[1];
+        })
         .map(([id]) => id)
-        .filter((id) => SMALL_FOTMOB_LEAGUES.has(id))
         .slice(0, 3)
     : [];
   await mapPool(
@@ -992,10 +1007,10 @@ export async function enrichHistoricWithExternal(
   const thinAfterFotmob = thin.filter(
     ({ team }) => (bundle.byTeamId.get(team.id)?.length ?? 0) < 2
   ).length;
-  if (false && !budgetExceeded() && thinAfterFotmob >= 40) {
+  if (!budgetExceeded() && thinAfterFotmob >= 2) {
     const csvIndex: TeamIndex = new Map();
     await mapPool(
-      FD_CSV_DIVS.slice(0, 4),
+      FD_CSV_DIVS.slice(0, 2),
       2,
       async (div) => {
         if (budgetExceeded()) return;
@@ -1029,7 +1044,7 @@ export async function enrichHistoricWithExternal(
       team.name
     )
   );
-  if (false && !budgetExceeded() && maybeDe) {
+  if (!budgetExceeded() && maybeDe) {
     try {
       const ol = await loadOpenLigaBl(kv);
       if (ol.size) {
@@ -1058,7 +1073,7 @@ export async function enrichHistoricWithExternal(
       const nb = bundle.byTeamId.get(b.team.id)?.length ?? 0;
       return na - nb;
     })
-    .slice(0, 18);
+    .slice(0, 2);
   // Always attempt TheSportsDB for thin sides (primary Free-plan path).
   if (stillThin.length) {
     await mapPool(
