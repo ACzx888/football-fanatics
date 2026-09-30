@@ -384,15 +384,28 @@ function lookupInIndex(
   index: TeamIndex,
   leagueHint?: string
 ): ExtSample[] {
-  const candidates = [...index.keys()].map((name) => ({
-    name,
-    item: name,
-    hint: leagueHint,
-  }));
-  const hit = bestNameMatch(teamName, candidates, {
-    minScore: 0.58,
-    leagueHint,
-  });
+  const exact = normalizeTeamName(teamName);
+  if (index.has(exact)) return dedupeSamples(index.get(exact) || []);
+  // Alias / fuzzy only over a capped candidate list
+  const keys = [...index.keys()];
+  if (keys.length > 80) {
+    // Prefer keys that share a token prefix to keep CPU bounded
+    const tok = exact.split(" ").filter(Boolean)[0] || exact;
+    const narrowed = keys.filter((k) => k.includes(tok)).slice(0, 40);
+    const pool = narrowed.length ? narrowed : keys.slice(0, 40);
+    const hit = bestNameMatch(
+      teamName,
+      pool.map((name) => ({ name, item: name, hint: leagueHint })),
+      { minScore: 0.62, leagueHint }
+    );
+    if (!hit) return [];
+    return dedupeSamples(index.get(hit.item) || []);
+  }
+  const hit = bestNameMatch(
+    teamName,
+    keys.map((name) => ({ name, item: name, hint: leagueHint })),
+    { minScore: 0.58, leagueHint }
+  );
   if (!hit) return [];
   return dedupeSamples(index.get(hit.item) || []);
 }
@@ -635,7 +648,7 @@ export async function enrichHistoricWithExternal(
   const leagueIds = [...demand.entries()]
     .sort((a, b) => b[1] - a[1])
     .map(([id]) => id)
-    .slice(0, 6);
+    .slice(0, 3);
 
   const mergedIndex: TeamIndex = new Map();
   for (const lid of leagueIds) {
@@ -651,7 +664,7 @@ export async function enrichHistoricWithExternal(
 
   // At most 2 CSV divisions (corners for major EU clubs when names match)
   const season = seasonPath();
-  for (const div of FD_CSV_DIVS.slice(0, 2)) {
+  for (const div of FD_CSV_DIVS.slice(0, 1)) {
     const idx = await loadKvIndex(kv, `${EXT_PREFIX}fdcsv:${season}:${div}`);
     if (!idx.size) continue;
     stats.csvDivisions++;

@@ -190,8 +190,9 @@ export async function fetchMatchesPayload(): Promise<MatchesApiResponse> {
     }
     if (historic) {
       try {
+        // Cheap KV-only merge (exact name first; fuzzy capped)
         const enriched = await enrichHistoricWithExternal(historic, teamRefs, {
-          budgetMs: 10_000,
+          budgetMs: 3_000,
         });
         historic = enriched.bundle;
         extEnriched = enriched.stats.teamsEnriched;
