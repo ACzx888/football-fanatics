@@ -625,15 +625,17 @@ export async function enrichHistoricWithExternal(
     .filter((x) => x.n < 2)
     .sort((a, b) => a.n - b.n);
 
-  // Collect relevant warmed league indexes
-  const leagueIds = new Set<number>();
+  // Only load leagues demanded by *this card* (cap KV JSON parses for Free CPU)
+  const demand = new Map<number, number>();
   for (const { team } of thin) {
     for (const id of resolveFotmobLeagueIds(team.leagueCode, team.league)) {
-      leagueIds.add(id);
+      demand.set(id, (demand.get(id) || 0) + 1);
     }
   }
-  // Also load common warm set so friendlies / cross-league help
-  for (const w of WARM_FOTMOB_LEAGUES.slice(0, 14)) leagueIds.add(w.id);
+  const leagueIds = [...demand.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([id]) => id)
+    .slice(0, 6);
 
   const mergedIndex: TeamIndex = new Map();
   for (const lid of leagueIds) {
@@ -647,9 +649,9 @@ export async function enrichHistoricWithExternal(
     }
   }
 
-  // CSV warmed indexes
+  // At most 2 CSV divisions (corners for major EU clubs when names match)
   const season = seasonPath();
-  for (const div of FD_CSV_DIVS) {
+  for (const div of FD_CSV_DIVS.slice(0, 2)) {
     const idx = await loadKvIndex(kv, `${EXT_PREFIX}fdcsv:${season}:${div}`);
     if (!idx.size) continue;
     stats.csvDivisions++;
@@ -657,19 +659,6 @@ export async function enrichHistoricWithExternal(
     for (const [k, v] of idx) {
       if (!mergedIndex.has(k)) mergedIndex.set(k, []);
       mergedIndex.get(k)!.push(...v);
-    }
-  }
-
-  // OpenLiga
-  {
-    const idx = await loadKvIndex(kv, `${EXT_PREFIX}openliga:bl1`);
-    if (idx.size) {
-      stats.openligadb++;
-      sourcesUsed.add("openligadb");
-      for (const [k, v] of idx) {
-        if (!mergedIndex.has(k)) mergedIndex.set(k, []);
-        mergedIndex.get(k)!.push(...v);
-      }
     }
   }
 
