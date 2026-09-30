@@ -188,11 +188,10 @@ export async function fetchMatchesPayload(): Promise<MatchesApiResponse> {
     } catch {
       historic = null;
     }
-    // EXT_ENRICH_DISABLED_FOR_RESTORE — re-enable after confirming HKJC-only is healthy
-    if (false && historic) {
+    if (historic) {
       try {
         const enriched = await enrichHistoricWithExternal(historic, teamRefs, {
-          budgetMs: 4_000,
+          budgetMs: 9_000,
         });
         historic = enriched.bundle;
         extEnriched = enriched.stats.teamsEnriched;

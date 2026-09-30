@@ -22,14 +22,14 @@ import { buildTeamForm, getTeamForm } from "./historic";
 import { bestNameMatch, normalizeTeamName } from "./team-match";
 import type { PredictionSource } from "./types";
 
-const EXT_PREFIX = "extform:v1:";
+const EXT_PREFIX = "extform:v2:";
 const KV_TTL_LEAGUE = 6 * 60 * 60; // 6h
 const KV_TTL_TEAM = 12 * 60 * 60;
 const KV_TTL_CSV = 18 * 60 * 60;
 const MAX_SAMPLES = 12;
 const FETCH_TIMEOUT_MS = 5_000;
 const ENRICH_BUDGET_MS = 8_000;
-const CONCURRENCY = 4;
+const CONCURRENCY = 3;
 
 export type ExtTeamRef = TeamRef & {
   league?: string;
@@ -106,7 +106,20 @@ const FOTMOB_LEAGUE_MAP: Record<string, number[]> = {
 /** League payloads that are too large to JSON-parse on Workers cold path. */
 const HUGE_FOTMOB_LEAGUES = new Set([130, 8972, 161, 114]); // MLS, USL, Uruguay, Friendlies
 /** FotMob league dumps are too large for Free-plan Worker CPU (JSON parse → 1102). */
-const USE_FOTMOB_LEAGUES = false;
+const USE_FOTMOB_LEAGUES = true;
+/** Allow-list of small FotMob league payloads safe on Free Worker CPU. */
+const SMALL_FOTMOB_LEAGUES = new Set([
+  9821, // CONCACAF NL ~74
+  9375, // WCL ~54
+  11129, // Women Europa ~56
+  9833, // Asian Games ~27
+  9717, // Women League Cup ~69
+  329, // Gulf Cup ~15
+  11027, // UAE League Cup ~21
+  9091, // Copa Chile — borderline, keep
+  10342, // Copa Uruguay ~31
+  10608, // AFCON Qual — 156, skip via not listing? include carefully
+]);
 
 const FD_CSV_DIVS = [
   "E0",
@@ -515,7 +528,7 @@ async function loadTheSportsDbTeam(
       // fall through
     }
   }
-  const q = encodeURIComponent(teamName.replace(/\s+/g, "_"));
+  const q = encodeURIComponent(teamName.trim());
   const search = await fetchJson<{
     teams?: Array<{
       idTeam?: string;
@@ -528,7 +541,7 @@ async function loadTheSportsDbTeam(
     (t) => (t.strSport || "").toLowerCase() === "soccer"
   );
   if (!teams.length) {
-    await kvPut(kv, cacheKey, "[]", KV_TTL_TEAM);
+    await kvPut(kv, cacheKey, "[]", 10 * 60);
     return [];
   }
   const hit = bestNameMatch(
@@ -537,7 +550,7 @@ async function loadTheSportsDbTeam(
     { minScore: 0.55 }
   );
   if (!hit?.item.idTeam) {
-    await kvPut(kv, cacheKey, "[]", KV_TTL_TEAM);
+    await kvPut(kv, cacheKey, "[]", 10 * 60);
     return [];
   }
   const last = await fetchJson<{
@@ -917,8 +930,8 @@ export async function enrichHistoricWithExternal(
     ? [...leagueDemand.entries()]
         .sort((a, b) => b[1] - a[1])
         .map(([id]) => id)
-        .filter((id) => !HUGE_FOTMOB_LEAGUES.has(id))
-        .slice(0, 4)
+        .filter((id) => SMALL_FOTMOB_LEAGUES.has(id))
+        .slice(0, 3)
     : [];
   await mapPool(
     leagueIdList,
@@ -1014,8 +1027,13 @@ export async function enrichHistoricWithExternal(
   // --- 4) TheSportsDB for still-thin teams (1 last event — better than 0) ---
   // Primary keyless path on Free Workers: TheSportsDB (tiny JSON).
   const stillThin = thin
-    .filter(({ team }) => (bundle.byTeamId.get(team.id)?.length ?? 0) < 1)
-    .slice(0, 6);
+    .filter(({ team }) => (bundle.byTeamId.get(team.id)?.length ?? 0) < 2)
+    .sort((a, b) => {
+      const na = bundle.byTeamId.get(a.team.id)?.length ?? 0;
+      const nb = bundle.byTeamId.get(b.team.id)?.length ?? 0;
+      return na - nb;
+    })
+    .slice(0, 14);
   if (!budgetExceeded() && stillThin.length) {
     await mapPool(
       stillThin,
@@ -1043,7 +1061,7 @@ export async function enrichHistoricWithExternal(
 
   // --- 5) Optional football-data.org ---
   const fdKey = env?.FOOTBALL_DATA_API_KEY;
-  if (false && fdKey && !budgetExceeded()) {
+  if (fdKey && !budgetExceeded()) {
     const need = thin
       .filter(({ team }) => (bundle.byTeamId.get(team.id)?.length ?? 0) < 2)
       .slice(0, 10);
@@ -1053,7 +1071,7 @@ export async function enrichHistoricWithExternal(
       async ({ team }) => {
         if (budgetExceeded()) return;
         try {
-          const extra = await loadFootballDataOrgTeam(team.name, fdKey, kv);
+          const extra = await loadFootballDataOrgTeam(team.name, fdKey!, kv);
           if (!extra.length) return;
           sourcesUsed.add("football-data-org");
           stats.footballDataOrg++;
@@ -1069,7 +1087,7 @@ export async function enrichHistoricWithExternal(
 
   // --- 6) Optional api-football ---
   const afKey = env?.API_FOOTBALL_KEY;
-  if (false && afKey && !budgetExceeded()) {
+  if (afKey && !budgetExceeded()) {
     const need = thin
       .filter(({ team }) => (bundle.byTeamId.get(team.id)?.length ?? 0) < 2)
       .slice(0, 8);
@@ -1079,7 +1097,7 @@ export async function enrichHistoricWithExternal(
       async ({ team }) => {
         if (budgetExceeded()) return;
         try {
-          const extra = await loadApiFootballTeam(team.name, afKey, kv);
+          const extra = await loadApiFootballTeam(team.name, afKey!, kv);
           if (!extra.length) return;
           sourcesUsed.add("api-football");
           stats.apiFootball++;
