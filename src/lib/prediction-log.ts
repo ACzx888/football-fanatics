@@ -326,6 +326,28 @@ export async function recordLivePredictions(
             }
           );
         };
+        // One-way HAD fill: unavailable → available when external form unlocks
+        const fillHad = (
+          locked: StoredHadPrediction,
+          fresh: MatchPredictions["had"]
+        ): StoredHadPrediction => {
+          if (locked.available) return locked;
+          if (!fresh.available) return locked;
+          const pickLabel = fresh.label ?? null;
+          return {
+            available: true,
+            pick: pickLabel,
+            pickCode: hadCodeFromLabel(pickLabel ?? undefined),
+            confidencePct: fresh.confidencePct ?? null,
+            modelProb: fresh.modelProb ?? null,
+            selections: (fresh.selections || []).map((s) => ({
+              code: s.code,
+              label: s.label,
+              modelPct: s.modelPct,
+            })),
+            detail: fresh.detail,
+          };
+        };
         const metaOnly: PredictionRecord = {
           ...existing,
           frontEndId: m.frontEndId || existing.frontEndId,
@@ -338,7 +360,7 @@ export async function recordLivePredictions(
           statusAtRecord: String(m.status),
           updatedAt: nowIso,
           recordedAt: existing.recordedAt,
-          had: existing.had,
+          had: fillHad(existing.had, m.predictions.had),
           totalCorners: fillCorner(existing.totalCorners, m.predictions.totalCorners),
           homeCorners: fillCorner(existing.homeCorners, m.predictions.homeCorners),
           awayCorners: fillCorner(existing.awayCorners, m.predictions.awayCorners),
