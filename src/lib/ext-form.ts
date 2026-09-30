@@ -954,7 +954,7 @@ export async function enrichHistoricWithExternal(
   const thinAfterFotmob = thin.filter(
     ({ team }) => (bundle.byTeamId.get(team.id)?.length ?? 0) < 2
   ).length;
-  if (!budgetExceeded() && thinAfterFotmob >= 40) {
+  if (false && !budgetExceeded() && thinAfterFotmob >= 40) {
     const csvIndex: TeamIndex = new Map();
     await mapPool(
       FD_CSV_DIVS.slice(0, 4),
@@ -991,7 +991,7 @@ export async function enrichHistoricWithExternal(
       team.name
     )
   );
-  if (!budgetExceeded() && maybeDe) {
+  if (false && !budgetExceeded() && maybeDe) {
     try {
       const ol = await loadOpenLigaBl(kv);
       if (ol.size) {
@@ -1014,8 +1014,8 @@ export async function enrichHistoricWithExternal(
   // --- 4) TheSportsDB for still-thin teams (1 last event — better than 0) ---
   // Primary keyless path on Free Workers: TheSportsDB (tiny JSON).
   const stillThin = thin
-    .filter(({ team }) => (bundle.byTeamId.get(team.id)?.length ?? 0) < 2)
-    .slice(0, 20);
+    .filter(({ team }) => (bundle.byTeamId.get(team.id)?.length ?? 0) < 1)
+    .slice(0, 6);
   if (!budgetExceeded() && stillThin.length) {
     await mapPool(
       stillThin,
@@ -1043,7 +1043,7 @@ export async function enrichHistoricWithExternal(
 
   // --- 5) Optional football-data.org ---
   const fdKey = env?.FOOTBALL_DATA_API_KEY;
-  if (fdKey && !budgetExceeded()) {
+  if (false && fdKey && !budgetExceeded()) {
     const need = thin
       .filter(({ team }) => (bundle.byTeamId.get(team.id)?.length ?? 0) < 2)
       .slice(0, 10);
@@ -1069,7 +1069,7 @@ export async function enrichHistoricWithExternal(
 
   // --- 6) Optional api-football ---
   const afKey = env?.API_FOOTBALL_KEY;
-  if (afKey && !budgetExceeded()) {
+  if (false && afKey && !budgetExceeded()) {
     const need = thin
       .filter(({ team }) => (bundle.byTeamId.get(team.id)?.length ?? 0) < 2)
       .slice(0, 8);

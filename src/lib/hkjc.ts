@@ -188,21 +188,15 @@ export async function fetchMatchesPayload(): Promise<MatchesApiResponse> {
     } catch {
       historic = null;
     }
-    if (historic) {
+    // EXT_ENRICH_DISABLED_FOR_RESTORE — re-enable after confirming HKJC-only is healthy
+    if (false && historic) {
       try {
-        const enrichPromise = enrichHistoricWithExternal(historic, teamRefs, {
-          budgetMs: 10_000,
+        const enriched = await enrichHistoricWithExternal(historic, teamRefs, {
+          budgetMs: 4_000,
         });
-        // Hard cap so Worker never hits CPU 1102 on cold multi-source fetch
-        const enriched = await Promise.race([
-          enrichPromise,
-          new Promise<null>((resolve) => setTimeout(() => resolve(null), 12000)),
-        ]);
-        if (enriched) {
-          historic = enriched.bundle;
-          extEnriched = enriched.stats.teamsEnriched;
-          extSources = enriched.stats.sourcesUsed;
-        }
+        historic = enriched.bundle;
+        extEnriched = enriched.stats.teamsEnriched;
+        extSources = enriched.stats.sourcesUsed;
       } catch {
         // keep HKJC-only historic
       }

@@ -76,7 +76,7 @@ const PAGE = 20;
 const CONCURRENCY = 8;
 const MAX_SAMPLES_PER_TEAM = 12;
 /** Soft budget for /api/matches historic enrichment on Workers (~30s OpenNext). */
-export const HISTORIC_BUDGET_MS = 12_000;
+export const HISTORIC_BUDGET_MS = 20_000;
 const PER_REQUEST_TIMEOUT_MS = 4_000;
 /** ≥2 samples: keep longer so warm KV hits skip network. */
 const KV_TTL_COMPLETE_SECONDS = 36 * 60 * 60; // 36h
