@@ -35,6 +35,9 @@ export interface StoredCornerPrediction {
   expected: number | null;
   confidencePct: number | null;
   label?: string;
+  detail?: string;
+  factors?: string[];
+  sources?: Array<"form" | "xG" | "inplay" | "tempo" | "goals-proxy" | "tempo-proxy">;
 }
 
 export interface PredictionRecord {
@@ -152,6 +155,9 @@ function cornerStored(
     expected: p.available ? p.expectedValue ?? null : null,
     confidencePct: p.available ? p.confidencePct ?? null : null,
     label: p.label,
+    detail: p.available ? p.detail : undefined,
+    factors: p.available ? p.factors : undefined,
+    sources: p.available ? p.sources : undefined,
   };
 }
 
@@ -292,7 +298,25 @@ export async function recordLivePredictions(
           locked: StoredCornerPrediction | undefined,
           fresh: MatchPredictions["totalCorners"]
         ): StoredCornerPrediction => {
-          if (locked?.available) return locked;
+          if (locked?.available) {
+            // Keep locked numbers; backfill provenance if first write omitted it
+            if (
+              (!locked.factors?.length || !locked.sources?.length) &&
+              fresh.available
+            ) {
+              return {
+                ...locked,
+                detail: locked.detail ?? fresh.detail,
+                factors: locked.factors?.length
+                  ? locked.factors
+                  : fresh.factors,
+                sources: locked.sources?.length
+                  ? locked.sources
+                  : fresh.sources,
+              };
+            }
+            return locked;
+          }
           if (fresh.available) return cornerStored(fresh);
           return (
             locked ?? {
@@ -716,7 +740,9 @@ export async function getPredictionsPayload(): Promise<PredictionsApiResponse> {
 
 function cornerFromStored(
   stored: StoredCornerPrediction | undefined | null,
-  sources: Array<"form" | "xG"> = ["form"]
+  fallbackSources: Array<
+    "form" | "xG" | "inplay" | "tempo" | "goals-proxy" | "tempo-proxy"
+  > = ["form"]
 ): MatchPredictions["totalCorners"] {
   if (!stored) {
     return {
@@ -725,13 +751,24 @@ function cornerFromStored(
       reason: "Insufficient Data at lock time",
     };
   }
+  const sources = stored.available
+    ? stored.sources?.length
+      ? stored.sources
+      : fallbackSources
+    : undefined;
+  const factors = stored.available
+    ? [...(stored.factors || []), "locked"].filter(
+        (v, i, a) => a.indexOf(v) === i
+      )
+    : undefined;
   return {
     available: stored.available,
     label: stored.label,
     confidencePct: stored.confidencePct ?? undefined,
     expectedValue: stored.expected,
-    sources: stored.available ? sources : undefined,
-    factors: stored.available ? ["locked"] : undefined,
+    detail: stored.detail,
+    sources,
+    factors,
     reason: stored.available ? undefined : "Insufficient Data at lock time",
   };
 }
