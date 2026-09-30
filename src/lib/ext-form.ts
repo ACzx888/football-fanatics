@@ -649,7 +649,7 @@ export async function enrichHistoricWithExternal(
     .sort((a, b) => b[1] - a[1])
     .map(([id]) => id);
   // Prefer likely-warmed small leagues even if lower demand count
-  const preferred = [9821, 9375, 11129, 9717, 114, 10608, 9833, 11027, 329, 9091, 10342, 288, 9227];
+  const preferred = [9821, 9375, 11129, 9717, 114, 10608, 9833, 11027, 329, 9091, 10342, 288, 9227, 10437, 161, 8972, 130];
   const ordered = [
     ...preferred.filter((id) => leagueIds.includes(id)),
     ...leagueIds.filter((id) => !preferred.includes(id)),
@@ -658,7 +658,7 @@ export async function enrichHistoricWithExternal(
   const mergedIndex: TeamIndex = new Map();
   let loaded = 0;
   for (const lid of ordered) {
-    if (loaded >= 5) break;
+    if (loaded >= 7) break;
     const idx = await loadKvIndex(kv, `${EXT_PREFIX}fotmob:idx:${lid}`);
     if (!idx.size) continue;
     loaded++;
