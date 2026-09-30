@@ -102,6 +102,10 @@ const FOTMOB_LEAGUE_MAP: Record<string, number[]> = {
 };
 
 /** football-data.co.uk division codes (current season path mmz4281/2526/). */
+
+/** League payloads that are too large to JSON-parse on Workers cold path. */
+const HUGE_FOTMOB_LEAGUES = new Set([130, 8972, 161, 114]); // MLS, USL, Uruguay, Friendlies
+
 const FD_CSV_DIVS = [
   "E0",
   "E1",
@@ -910,7 +914,8 @@ export async function enrichHistoricWithExternal(
   const leagueIdList = [...leagueDemand.entries()]
     .sort((a, b) => b[1] - a[1])
     .map(([id]) => id)
-    .slice(0, 5);
+    .filter((id) => !HUGE_FOTMOB_LEAGUES.has(id))
+    .slice(0, 4);
   await mapPool(
     leagueIdList,
     2,
@@ -1004,8 +1009,8 @@ export async function enrichHistoricWithExternal(
 
   // --- 4) TheSportsDB for still-thin teams (1 last event — better than 0) ---
   const stillThin = thin
-    .filter(({ team }) => (bundle.byTeamId.get(team.id)?.length ?? 0) < 1)
-    .slice(0, 8);
+    .filter(({ team }) => (bundle.byTeamId.get(team.id)?.length ?? 0) < 2)
+    .slice(0, 16);
   if (!budgetExceeded() && stillThin.length) {
     await mapPool(
       stillThin,

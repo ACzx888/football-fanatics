@@ -11,6 +11,9 @@
   "observability": {
     "enabled": true
   },
+  "limits": {
+    "cpu_ms": 60_000
+  },
   "kv_namespaces": [
     {
       "binding": "HISTORIC_CACHE",
