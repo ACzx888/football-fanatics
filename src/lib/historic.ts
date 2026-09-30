@@ -186,11 +186,25 @@ export function pickFullTimeResult(
     results.filter((r) => r.resultType === 1).slice(-1)[0] ||
     results[results.length - 1];
   if (row?.homeResult == null || row?.awayResult == null) return null;
+  // Prefer FT-row corners; else any stage/resultType row with ttlCornerResult ≥ 0
+  // (HKJC often leaves FT ttlCornerResult as -1 even when another row has it).
+  let corners: number | null = null;
   const c = row.ttlCornerResult;
+  if (c != null && c >= 0) {
+    corners = c;
+  } else {
+    for (const r of results) {
+      const v = r.ttlCornerResult;
+      if (v != null && v >= 0) {
+        corners = v;
+        break;
+      }
+    }
+  }
   return {
     home: row.homeResult,
     away: row.awayResult,
-    corners: c != null && c >= 0 ? c : null,
+    corners,
   };
 }
 
@@ -418,6 +432,70 @@ function emptyBundle(note: string, coverage?: FormCoverage): HistoricBundle {
 function avg(nums: number[]): number {
   if (!nums.length) return 0;
   return nums.reduce((a, b) => a + b, 0) / nums.length;
+}
+
+/**
+ * Patch totalCorners onto a cached team sample after settlement.
+ * Builds real corner history over time when HKJC historic lacks ttlCornerResult.
+ */
+export async function enrichTeamSampleCorners(
+  teamId: string,
+  teamName: string,
+  matchId: string,
+  totalCorners: number,
+  isHome: boolean
+): Promise<boolean> {
+  if (!teamId || totalCorners < 0) return false;
+  const kv = await getHistoricKv();
+  const store = getStore();
+  let samples =
+    store.teamCache.get(teamId)?.samples ||
+    (kv ? (await readTeamFromKv(kv, teamId))?.samples : null) ||
+    [];
+  if (!samples.length) {
+    // Seed a minimal sample so future form can carry corners
+    samples = [
+      {
+        matchId,
+        date: "",
+        isHome,
+        goalsFor: 0,
+        goalsAgainst: 0,
+        result: "D",
+        totalCorners,
+        opponentId: "",
+        opponentName: "",
+      },
+    ];
+  } else {
+    let hit = false;
+    samples = samples.map((s) => {
+      if (s.matchId !== matchId) return s;
+      hit = true;
+      if (s.totalCorners != null && s.totalCorners >= 0) return s;
+      return { ...s, totalCorners };
+    });
+    if (!hit) {
+      samples = dedupeSortTrim([
+        {
+          matchId,
+          date: "",
+          isHome,
+          goalsFor: 0,
+          goalsAgainst: 0,
+          result: "D",
+          totalCorners,
+          opponentId: "",
+          opponentName: "",
+        },
+        ...samples,
+      ]);
+    }
+  }
+  samples = dedupeSortTrim(samples);
+  store.teamCache.set(teamId, { samples, cachedAt: Date.now() });
+  if (kv) await writeTeamToKv(kv, teamId, teamName || teamId, samples);
+  return true;
 }
 
 export function buildTeamForm(

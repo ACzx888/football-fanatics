@@ -77,7 +77,7 @@ npm run preview
 
 1. **Historic form** — last ~28 days of completed matches via `searchHistoricFootballMatches`, cached in-process (~20 min TTL). Per team: last ≤12 results → PPG, home/away scoring rates, form score.
 2. **HAD** — Poisson from attack/defence rates (home/away adjusted). Pick H/D/A from model probs. Requires ≥3 recent games each side; otherwise **Insufficient Data**. Confidence from sample size, rate stability, and separation between top outcomes (capped ~82%) — **not** from market.
-3. **Corners** — historic corner averages when HKJC provides `ttlCornerResult` (≥0). If historic corners are missing (common: often `-1`), show **Insufficient Data** rather than inventing from odds. In-play: project FT total from live corner count ÷ elapsed minute fraction.
+3. **Corners** — prefer historic averages when HKJC provides `ttlCornerResult` (≥0). When historic corners are missing (common: often `-1`) but HAD form exists, use a labeled **goals-proxy / tempo-proxy** from Poisson λ and attack tempo (empirical ~10.2 base corners, scaled by combined xG) — never odds, never called “historic corners”, lower confidence. Settled live corner totals are written back into teamform KV to grow real corner history over time.
 4. Never invent high-confidence numbers when data is missing — show **Insufficient Data**.
 
 Analysis is for entertainment only — **not betting advice**.
@@ -87,7 +87,7 @@ Analysis is for entertainment only — **not betting advice**.
 - HKJC `startDate`/`endDate` on *live* matches often error; filtering is done locally by kickoff HKT date.
 - Historic lookback is capped for latency (~15–20s cold cache); sparse leagues may lack form.
 - Match minute is estimated from kickoff + status; HKJC payloads here do not expose an official clock.
-- Historic corner totals are generally unavailable from the search API (`ttlCornerResult` typically `-1`) — pre-match corner picks often show Insufficient Data unless in-play rate is available.
+- Historic corner totals are generally unavailable from the search API (`ttlCornerResult` typically `-1`) — pre-match corners then use the labeled goals/tempo proxy whenever HAD form is available. Optional `API_FOOTBALL_KEY` / `FOOTBALL_DATA_API_KEY` hooks exist for future external corner form (KV `cornerform:v1:*`); no key is configured in the current deploy.
 
 ## Disclaimer
 

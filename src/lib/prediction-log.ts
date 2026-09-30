@@ -1,5 +1,6 @@
 import { getCloudflareContext } from "@opennextjs/cloudflare";
-import { pickFullTimeResult } from "./historic";
+import { enrichTeamSampleCorners, pickFullTimeResult } from "./historic";
+import { putExternalCornerForm } from "./corners-external";
 import {
   searchHistoricFootballMatches,
 } from "./hkjc-graphql";
@@ -283,8 +284,24 @@ export async function recordLivePredictions(
       }
 
       if (existing) {
-        // First write wins for the forecast. Only refresh non-forecast metadata.
+        // First write wins for available forecasts. One-way fill only:
+        // if a market was locked as unavailable but a fresh fundamental
+        // estimate now exists (e.g. corners via goals-proxy), store it once.
         const nowIso = new Date().toISOString();
+        const fillCorner = (
+          locked: StoredCornerPrediction | undefined,
+          fresh: MatchPredictions["totalCorners"]
+        ): StoredCornerPrediction => {
+          if (locked?.available) return locked;
+          if (fresh.available) return cornerStored(fresh);
+          return (
+            locked ?? {
+              available: false,
+              expected: null,
+              confidencePct: null,
+            }
+          );
+        };
         const metaOnly: PredictionRecord = {
           ...existing,
           frontEndId: m.frontEndId || existing.frontEndId,
@@ -296,22 +313,17 @@ export async function recordLivePredictions(
           awayTeamId: m.awayTeamId || existing.awayTeamId,
           statusAtRecord: String(m.status),
           updatedAt: nowIso,
-          // Explicitly keep locked forecast + settlement fields
           recordedAt: existing.recordedAt,
           had: existing.had,
-          totalCorners: existing.totalCorners,
-          homeCorners: existing.homeCorners,
-          awayCorners: existing.awayCorners,
-          homeGoals: existing.homeGoals ?? {
-            available: false,
-            expected: null,
-            confidencePct: null,
-          },
-          awayGoals: existing.awayGoals ?? {
-            available: false,
-            expected: null,
-            confidencePct: null,
-          },
+          totalCorners: fillCorner(existing.totalCorners, m.predictions.totalCorners),
+          homeCorners: fillCorner(existing.homeCorners, m.predictions.homeCorners),
+          awayCorners: fillCorner(existing.awayCorners, m.predictions.awayCorners),
+          homeGoals: existing.homeGoals?.available
+            ? existing.homeGoals
+            : fillCorner(existing.homeGoals, m.predictions.homeGoals),
+          awayGoals: existing.awayGoals?.available
+            ? existing.awayGoals
+            : fillCorner(existing.awayGoals, m.predictions.awayGoals),
           homeScore: existing.homeScore,
           awayScore: existing.awayScore,
           corners: existing.corners,
@@ -459,6 +471,34 @@ export async function settleFromLiveMatches(
         awayCorner: m.live.awayCorner ?? null,
       });
       await kv.put(key, JSON.stringify(next));
+      // Feed real FT corners into teamform KV when HKJC historic lacked them
+      const tc = m.live.corner;
+      if (tc != null && tc >= 0) {
+        try {
+          if (m.homeTeamId) {
+            await enrichTeamSampleCorners(
+              m.homeTeamId,
+              m.homeTeam,
+              m.id,
+              tc,
+              true
+            );
+            await putExternalCornerForm(m.homeTeam, tc, 1, "live-settle");
+          }
+          if (m.awayTeamId) {
+            await enrichTeamSampleCorners(
+              m.awayTeamId,
+              m.awayTeam,
+              m.id,
+              tc,
+              false
+            );
+            await putExternalCornerForm(m.awayTeam, tc, 1, "live-settle");
+          }
+        } catch {
+          // ignore enrichment failures
+        }
+      }
       n++;
     } catch {
       // ignore

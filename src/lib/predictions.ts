@@ -1,4 +1,12 @@
 import type { TeamForm } from "./historic";
+import {
+  CORNER_SIDE_MAX,
+  CORNER_SIDE_MIN,
+  CORNER_TOTAL_MAX,
+  CORNER_TOTAL_MIN,
+  cornerSideShare,
+  cornersFromGoalTempo,
+} from "./corner-model";
 import type {
   LiveResult,
   MatchPredictions,
@@ -352,28 +360,103 @@ function historicCornerAverage(
   return { expected, n: vals.length };
 }
 
-function totalCornersPrediction(ctx: PredictionContext): PredictionOutcome {
-  // Fundamental / historic form only — never project from live minute or live corners.
+function formTempoRate(
+  home: TeamForm | null | undefined,
+  away: TeamForm | null | undefined
+): number | null {
+  if (!home || !away) return null;
+  return (
+    (home.avgScored + home.avgConceded + away.avgScored + away.avgConceded) / 4
+  );
+}
+
+function proxyCornerConfidence(sample: number, kind: string): number {
+  // Proxy is deliberately lower-confidence than real historic corners
+  let conf = 30 + Math.min(sample, 8) * 2.2;
+  if (kind === "blend") conf += 6;
+  if (sample <= 1) conf -= 8;
+  else if (sample <= 2) conf -= 4;
+  return roundPct(clamp(conf, 22, 58));
+}
+
+function historicCornerConfidence(n: number): number {
+  const sampleBoost = Math.min(n, 8);
+  return roundPct(clamp(40 + sampleBoost * 2.5, 36, 78));
+}
+
+function totalCornersPrediction(
+  ctx: PredictionContext,
+  lambdas: LambdaEstimate | null
+): PredictionOutcome {
+  // Fundamental only — never odds, never live minute projection.
   const factors: string[] = [];
   const sources: PredictionSource[] = [];
   let exp: number | null = null;
+  let detailParts: string[] = [];
+  let conf = 36;
 
   const hist = historicCornerAverage(ctx.homeForm, ctx.awayForm);
-  if (hist) {
-    exp = hist.expected;
-    factors.push("historic corners");
-    sources.push("form");
-  }
-
-  if (exp == null || !hist) {
-    return insufficient(
-      "No historic corner averages (HKJC ttlCornerResult often -1)"
+  const tempo = formTempoRate(ctx.homeForm, ctx.awayForm);
+  let proxy: { expected: number; factors: string[] } | null = null;
+  if (lambdas) {
+    proxy = cornersFromGoalTempo(
+      lambdas.lh,
+      lambdas.la,
+      ctx.leagueAvgGoals ?? 1.3,
+      tempo
     );
   }
 
-  exp = round1(clamp(exp, 3, 18));
-  const sampleBoost = Math.min(hist.n, 8);
-  const conf = roundPct(clamp(40 + sampleBoost * 2.5, 36, 78));
+  if (hist && proxy) {
+    // Prefer historic; lightly blend when sample is thin (3–4)
+    const wHist = hist.n >= 6 ? 0.85 : hist.n >= 5 ? 0.75 : 0.6;
+    exp = hist.expected * wHist + proxy.expected * (1 - wHist);
+    factors.push("historic corners");
+    factors.push(...proxy.factors);
+    sources.push("form", "goals-proxy");
+    if (proxy.factors.includes("tempo-proxy")) sources.push("tempo-proxy");
+    conf = historicCornerConfidence(hist.n);
+    // Blend slightly lowers confidence vs pure historic
+    conf = roundPct(clamp(conf - 4, 34, 74));
+    detailParts = [
+      `Historic+proxy blend ~${round1(exp)}`,
+      `${hist.n} corner samples`,
+      `λ-tempo ${round1(lambdas!.lh + lambdas!.la)}`,
+      "no odds",
+    ];
+  } else if (hist) {
+    exp = hist.expected;
+    factors.push("historic corners");
+    sources.push("form");
+    conf = historicCornerConfidence(hist.n);
+    detailParts = [
+      `Historic corner avg ~${round1(exp)} from ${hist.n} samples`,
+      "no odds",
+    ];
+  } else if (proxy && lambdas) {
+    exp = proxy.expected;
+    factors.push(...proxy.factors);
+    sources.push("goals-proxy");
+    if (proxy.factors.includes("tempo-proxy")) sources.push("tempo-proxy");
+    sources.push("xG");
+    conf = proxyCornerConfidence(lambdas.sample, "goals-proxy");
+    detailParts = [
+      `Goals/tempo proxy ~${round1(exp)}`,
+      `from xG ${round1(lambdas.lh)}-${round1(lambdas.la)}`,
+      `sample ${lambdas.sampleHome}+${lambdas.sampleAway}`,
+      "not historic corners · no odds",
+    ];
+  }
+
+  if (exp == null) {
+    return insufficient(
+      lambdas
+        ? "No corner history and goal-tempo proxy unavailable"
+        : "No historic corner averages (HKJC ttlCornerResult often -1); need form for goals-proxy"
+    );
+  }
+
+  exp = round1(clamp(exp, CORNER_TOTAL_MIN, CORNER_TOTAL_MAX));
 
   return {
     available: true,
@@ -382,71 +465,97 @@ function totalCornersPrediction(ctx: PredictionContext): PredictionOutcome {
     expectedValue: exp,
     line: null,
     modelProb: null,
-    sources,
+    sources: [...new Set(sources)],
     factors,
-    detail: `Historic corner avg ~${exp} from ${hist.n} samples · no odds`,
+    detail: detailParts.join(" · "),
   };
 }
 
 function teamCornersPrediction(
   side: "home" | "away",
   totalExpected: number | null,
-  ctx: PredictionContext
+  ctx: PredictionContext,
+  lambdas: LambdaEstimate | null
 ): PredictionOutcome {
-  // Fundamental / historic form only — never project from live minute or live corners.
+  // Fundamental only — never odds / CHH / CHA.
   const sideLabel = side === "home" ? "home" : "away";
   const factors: string[] = [];
   const sources: PredictionSource[] = [];
   let exp: number | null = null;
 
-  // Historic: share of match totals when corner counts exist
   const form = side === "home" ? ctx.homeForm : ctx.awayForm;
   const histCorners: number[] = [];
   if (form) {
     for (const s of form.samples) {
       if (s.totalCorners != null && s.totalCorners >= 0) {
-        // No side-split in HKJC historic — use half of total as weak prior only
-        // Prefer Insufficient Data unless we have enough + attack share
         histCorners.push(s.totalCorners);
       }
     }
   }
 
-  if (totalExpected != null && histCorners.length >= 3) {
-    const homeAtt =
-      ctx.homeForm?.avgScoredHome ?? ctx.homeForm?.avgScored ?? null;
-    const awayAtt =
-      ctx.awayForm?.avgScoredAway ?? ctx.awayForm?.avgScored ?? null;
-    let share = side === "home" ? 0.55 : 0.45;
-    if (homeAtt != null && awayAtt != null && homeAtt + awayAtt > 0) {
-      const homeShare = homeAtt / (homeAtt + awayAtt);
-      share =
-        side === "home"
-          ? 0.35 * 0.55 + 0.65 * homeShare
-          : 1 - (0.35 * 0.55 + 0.65 * homeShare);
-      factors.push("form-share");
-    } else {
-      factors.push("home-bias share");
-    }
+  const homeAtt =
+    ctx.homeForm?.avgScoredHome ?? ctx.homeForm?.avgScored ?? null;
+  const awayAtt =
+    ctx.awayForm?.avgScoredAway ?? ctx.awayForm?.avgScored ?? null;
+  const { share, factor: shareFactor } = cornerSideShare(
+    side,
+    lambdas?.lh ?? null,
+    lambdas?.la ?? null,
+    homeAtt,
+    awayAtt
+  );
+
+  if (totalExpected != null) {
     exp = totalExpected * share;
-    factors.push("historic corners");
-    sources.push("form");
-  } else if (histCorners.length >= 3 && totalExpected == null) {
-    // Side estimate as ~half of team-match corner totals (weak)
+    factors.push(shareFactor);
+    // Inherit provenance from total path via factors on total; label side path
+    if (histCorners.length >= 3) {
+      factors.push("historic corners");
+      sources.push("form");
+    } else if (lambdas) {
+      factors.push("goals-proxy");
+      sources.push("goals-proxy", "xG");
+    } else {
+      factors.push("historic corners");
+      sources.push("form");
+    }
+  } else if (histCorners.length >= 3) {
     const avgTotal =
       histCorners.reduce((a, b) => a + b, 0) / histCorners.length;
-    exp = avgTotal * (side === "home" ? 0.55 : 0.45);
-    factors.push("historic corners");
+    exp = avgTotal * share;
+    factors.push(shareFactor, "historic corners");
     sources.push("form");
+  } else if (lambdas) {
+    const tempo = formTempoRate(ctx.homeForm, ctx.awayForm);
+    const proxy = cornersFromGoalTempo(
+      lambdas.lh,
+      lambdas.la,
+      ctx.leagueAvgGoals ?? 1.3,
+      tempo
+    );
+    exp = proxy.expected * share;
+    factors.push(shareFactor, ...proxy.factors);
+    sources.push("goals-proxy", "xG");
+    if (proxy.factors.includes("tempo-proxy")) sources.push("tempo-proxy");
   }
 
   if (exp == null) {
-    return insufficient(`No ${sideLabel} corner history for fundamental forecast`);
+    return insufficient(
+      `No ${sideLabel} corner history or goals-proxy (need form samples)`
+    );
   }
 
-  exp = round1(clamp(exp, 0.5, 12));
+  exp = round1(clamp(exp, CORNER_SIDE_MIN, CORNER_SIDE_MAX));
   const conf = roundPct(
-    clamp(38 + (histCorners.length >= 3 ? 8 : 0), 36, 74)
+    clamp(
+      histCorners.length >= 3
+        ? 38 + Math.min(histCorners.length, 6)
+        : lambdas
+          ? proxyCornerConfidence(lambdas.sample, "goals-proxy")
+          : 36,
+      22,
+      74
+    )
   );
 
   return {
@@ -456,7 +565,7 @@ function teamCornersPrediction(
     expectedValue: exp,
     line: null,
     modelProb: null,
-    sources,
+    sources: [...new Set(sources)],
     factors,
     detail: `Fundamental ${sideLabel} corner projection · no CHH/CHA odds`,
   };
@@ -477,7 +586,7 @@ export function buildPredictions(
   const homeGoals = teamGoalsPrediction("home", ctx, lambdas);
   const awayGoals = teamGoalsPrediction("away", ctx, lambdas);
 
-  const totalCorners = totalCornersPrediction(ctx);
+  const totalCorners = totalCornersPrediction(ctx, lambdas);
   const totalExp = totalCorners.available
     ? totalCorners.expectedValue ?? null
     : null;
@@ -485,8 +594,8 @@ export function buildPredictions(
   return {
     had,
     totalCorners,
-    homeCorners: teamCornersPrediction("home", totalExp, ctx),
-    awayCorners: teamCornersPrediction("away", totalExp, ctx),
+    homeCorners: teamCornersPrediction("home", totalExp, ctx, lambdas),
+    awayCorners: teamCornersPrediction("away", totalExp, ctx, lambdas),
     homeGoals,
     awayGoals,
     method: "fundamental-only / no odds",

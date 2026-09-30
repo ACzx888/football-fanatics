@@ -11,7 +11,7 @@ export type MatchStatus =
   | string;
 
 /** Prediction provenance — fundamental only (never odds/market). */
-export type PredictionSource = "form" | "xG" | "inplay" | "tempo";
+export type PredictionSource = "form" | "xG" | "inplay" | "tempo" | "goals-proxy" | "tempo-proxy";
 
 export interface ModelSelection {
   code: string;
