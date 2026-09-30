@@ -661,7 +661,7 @@ export async function enrichHistoricWithExternal(
   const mergedIndex: TeamIndex = new Map();
   let loaded = 0;
   for (const lid of ordered) {
-    if (loaded >= 8) break;
+    if (loaded >= 6) break;
     const idx = await loadKvIndex(kv, `${EXT_PREFIX}fotmob:idx:${lid}`);
     if (!idx.size) continue;
     loaded++;
