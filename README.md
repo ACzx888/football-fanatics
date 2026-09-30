@@ -76,14 +76,15 @@ npm run preview
 ## How predictions work
 
 1. **Historic form (HKJC)** — team-targeted `searchHistoricFootballMatches` stacked ~14d windows (~84d), KV `teamform:v2:*`. Per team: last ≤12 results → PPG, home/away scoring rates, form score.
-2. **External form enricher** (`src/lib/ext-form.ts`) — fills thin/missing HKJC form from public sources (never odds):
-   - **FotMob** league fixtures (keyless JSON) — primary for internationals / cups / USL / MLS / women’s / U21
+2. **External form enricher** (`src/lib/ext-form.ts`) — fills thin/missing HKJC form from **KV-warmed** public sources (never odds):
+   - Warm via `GET /api/warm-ext?source=all-small&offset=0` (repeat with rising offset) or `?source=fotmob&id=9821` / `?source=csv&div=E0`
+   - **FotMob** league fixtures (keyless) — internationals / cups / women’s / U21 when warmed (large leagues size-skipped)
    - **football-data.co.uk** season CSVs (keyless) — goals + **real HC/AC corners** for major EU leagues
-   - **TheSportsDB** free search + last event (keyless, thin but unlocks 1-sample sides)
-   - **OpenLigaDB** (DE Bundesliga, keyless)
-   - **football-data.org v4** when `FOOTBALL_DATA_API_KEY` is set
-   - **api-football** when `API_FOOTBALL_KEY` is set (also corner statistics path)
-   - Team matching: fuzzy English name + alias table + HKJC tournament code → league map; KV `extform:v1:*`
+   - **OpenLigaDB** (DE) via `?source=openliga`
+   - **TheSportsDB** is **429 from Cloudflare IPs** — not used at runtime (see `/api/debug-ext`)
+   - Optional: `FOOTBALL_DATA_API_KEY` / `API_FOOTBALL_KEY` for deeper club/corner paths
+   - Team matching: fuzzy English name + alias table + HKJC tournament code → league map; KV `extform:v2:*`
+   - `/api/matches` only **reads** KV (avoids Free Worker CPU 1102 from large JSON parses)
 3. **HAD / team scores** — Poisson from attack/defence rates. Soft gate ≥1 sample each side (prefer ≥2). Confidence from sample size / stability / separation — **not** market.
 4. **Corners** — prefer real totals on samples (HKJC `ttlCornerResult`, CSV HC+AC, api-football stats). Else labeled **goals-proxy / tempo-proxy** from λ (never called “historic corners”).
 5. UI shows honest **source chips** (`hkjc` / `fotmob` / `football-data` / `goals-proxy` / …). Forecast lock after first write is unchanged.
