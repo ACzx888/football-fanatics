@@ -183,7 +183,7 @@ export async function fetchMatchesPayload(): Promise<MatchesApiResponse> {
       // Soften HKJC budget slightly so external enricher gets wall time
       historic = await loadHistoricForTeams(teamRefs as TeamRef[], {
         matchPairs,
-        budgetMs: 8_000,
+        budgetMs: 12_000,
       });
     } catch {
       historic = null;
@@ -191,12 +191,12 @@ export async function fetchMatchesPayload(): Promise<MatchesApiResponse> {
     if (historic) {
       try {
         const enrichPromise = enrichHistoricWithExternal(historic, teamRefs, {
-          budgetMs: 5_000,
+          budgetMs: 10_000,
         });
         // Hard cap so Worker never hits CPU 1102 on cold multi-source fetch
         const enriched = await Promise.race([
           enrichPromise,
-          new Promise<null>((resolve) => setTimeout(() => resolve(null), 5500)),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 12000)),
         ]);
         if (enriched) {
           historic = enriched.bundle;

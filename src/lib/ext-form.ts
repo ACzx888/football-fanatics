@@ -105,6 +105,8 @@ const FOTMOB_LEAGUE_MAP: Record<string, number[]> = {
 
 /** League payloads that are too large to JSON-parse on Workers cold path. */
 const HUGE_FOTMOB_LEAGUES = new Set([130, 8972, 161, 114]); // MLS, USL, Uruguay, Friendlies
+/** FotMob league dumps are too large for Free-plan Worker CPU (JSON parse → 1102). */
+const USE_FOTMOB_LEAGUES = false;
 
 const FD_CSV_DIVS = [
   "E0",
@@ -911,11 +913,13 @@ export async function enrichHistoricWithExternal(
     }
   }
   const fotmobIndex: TeamIndex = new Map();
-  const leagueIdList = [...leagueDemand.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .map(([id]) => id)
-    .filter((id) => !HUGE_FOTMOB_LEAGUES.has(id))
-    .slice(0, 4);
+  const leagueIdList = USE_FOTMOB_LEAGUES
+    ? [...leagueDemand.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([id]) => id)
+        .filter((id) => !HUGE_FOTMOB_LEAGUES.has(id))
+        .slice(0, 4)
+    : [];
   await mapPool(
     leagueIdList,
     2,
@@ -950,7 +954,7 @@ export async function enrichHistoricWithExternal(
   const thinAfterFotmob = thin.filter(
     ({ team }) => (bundle.byTeamId.get(team.id)?.length ?? 0) < 2
   ).length;
-  if (!budgetExceeded() && thinAfterFotmob >= 4) {
+  if (!budgetExceeded() && thinAfterFotmob >= 40) {
     const csvIndex: TeamIndex = new Map();
     await mapPool(
       FD_CSV_DIVS.slice(0, 4),
@@ -1008,9 +1012,10 @@ export async function enrichHistoricWithExternal(
   }
 
   // --- 4) TheSportsDB for still-thin teams (1 last event — better than 0) ---
+  // Primary keyless path on Free Workers: TheSportsDB (tiny JSON).
   const stillThin = thin
     .filter(({ team }) => (bundle.byTeamId.get(team.id)?.length ?? 0) < 2)
-    .slice(0, 16);
+    .slice(0, 20);
   if (!budgetExceeded() && stillThin.length) {
     await mapPool(
       stillThin,
