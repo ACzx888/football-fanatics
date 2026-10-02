@@ -20,7 +20,7 @@ export function MatchBoard({ initial }: { initial: MatchesApiResponse }) {
   const refresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      const res = await fetch("/api/matches?light=1", { cache: "no-store" });
+      const res = await fetch("/api/matches", { cache: "no-store" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = (await res.json()) as MatchesApiResponse;
       setData(json);
