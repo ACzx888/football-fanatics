@@ -6,7 +6,6 @@ import {
   type TeamRef,
 } from "./historic";
 import {
-  enrichHistoricWithExternal,
   teamFormSources,
   type ExtTeamRef,
 } from "./ext-form";
@@ -153,10 +152,15 @@ function collectTeamRefs(
 
 export type FetchMatchesOptions = {
   /**
-   * Light mode: memory+KV historic only (no HKJC network form fills).
-   * Prefer for homepage / ?light=1 so fixtures never 1102.
+   * Light mode: live fixtures only (no form KV/ext/network).
+   * Prefer for homepage / ?light=1 so Free Workers never 1102.
    */
   light?: boolean;
+  /**
+   * Allow a tiny memory+KV form merge (still no HKJC historic network).
+   * Ignored when light=true.
+   */
+  form?: boolean;
 };
 
 /**
@@ -170,6 +174,9 @@ export async function fetchMatchesPayload(
   opts?: FetchMatchesOptions
 ): Promise<MatchesApiResponse> {
   const light = opts?.light === true;
+  // Default board path stays cheap: form only when explicitly requested
+  // or when not light (small memory+KV merge). Network historic is off.
+  const wantForm = !light && opts?.form !== false;
   const now = new Date();
   const today = formatHktDate(now);
   const tomorrow = addDaysHkt(now, 1);
@@ -192,35 +199,31 @@ export async function fetchMatchesPayload(
   let historic: HistoricBundle | null = null;
   let extEnriched = 0;
   let extSources: string[] = [];
-  if (teamRefs.length > 0) {
+  if (teamRefs.length > 0 && wantForm) {
     try {
-      // Cheap request path: prefer memory+KV; tiny 0-sample fill only when not light
+      // Memory + capped KV only — never HKJC multi-window on the board path
       historic = await loadHistoricForTeams(teamRefs as TeamRef[], {
         matchPairs,
-        budgetMs: light ? 1_500 : 4_000,
-        skipNetwork: light,
-        maxNetworkTeams: light ? 0 : 4,
+        budgetMs: 2_000,
+        skipNetwork: true,
+        maxNetworkTeams: 0,
         concurrency: 2,
         onlyZeroSample: true,
         skipDeepen: true,
+        maxKvReads: 10,
       });
     } catch {
       historic = null;
     }
-    if (historic) {
-      try {
-        // Cheap KV-only merge (exact name first; fuzzy capped) — never parse dumps
-        const enriched = await enrichHistoricWithExternal(historic, teamRefs, {
-          budgetMs: light ? 1_500 : 2_500,
-          maxLeagues: light ? 2 : 3,
-        });
-        historic = enriched.bundle;
-        extEnriched = enriched.stats.teamsEnriched;
-        extSources = enriched.stats.sourcesUsed;
-      } catch {
-        // keep HKJC-only historic — fixtures still returned
-      }
+    // Never merge large extform league indexes on the board path (CPU 1102).
+    // Per-team teamform KV + memory only. Warm indexes via /api/warm-ext.
+    if (historic?.note) {
+      historic.note = `${historic.note} · ext[board-skipped: run /api/warm-ext]`;
     }
+    extSources = [];
+    extEnriched = 0;
+  } else if (teamRefs.length > 0 && light) {
+    historic = null; // fixtures with Insufficient Data
   }
 
   const matches = rawMatches

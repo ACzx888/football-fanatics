@@ -847,12 +847,17 @@ export function predictionsFromRecord(rec: PredictionRecord): MatchPredictions {
  * Failures are swallowed so /api/matches never breaks.
  */
 export async function overlayLockedPredictions(
-  matches: FootballMatch[]
+  matches: FootballMatch[],
+  opts?: { limit?: number }
 ): Promise<number> {
   const kv = await getKv();
   if (!kv) return 0;
   let n = 0;
+  const limit = opts?.limit ?? 12;
+  let considered = 0;
   for (const m of matches) {
+    if (considered >= limit) break;
+    considered++;
     try {
       const predictionDay = m.matchDate || hktDateFromIso(m.kickOffTime);
       const key = predictionKey(m.id, predictionDay);

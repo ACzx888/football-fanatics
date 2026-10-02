@@ -596,6 +596,10 @@ export async function loadHistoricForTeams(
     onlyZeroSample?: boolean;
     /** Skip deepen passes 2/3 (older windows). Default true when maxNetworkTeams set. */
     skipDeepen?: boolean;
+    /** Cap how many teamform KV keys to read (Free CPU). */
+    maxKvReads?: number;
+    /** Skip memory+KV entirely (live fixtures only). */
+    skipForm?: boolean;
   }
 ): Promise<HistoricBundle> {
   const unique = new Map<string, string>();
@@ -614,12 +618,19 @@ export async function loadHistoricForTeams(
   const concurrency = Math.max(1, opts?.concurrency ?? CONCURRENCY);
   const onlyZeroSample = opts?.onlyZeroSample !== false;
   const skipNetwork = opts?.skipNetwork === true;
+  const skipForm = opts?.skipForm === true;
+  const maxKvReads = opts?.maxKvReads ?? 12;
   const skipDeepen =
     opts?.skipDeepen === true ||
     (opts?.skipDeepen !== false && maxNetworkTeams <= HISTORIC_MAX_NETWORK_TEAMS);
   const started = Date.now();
   const budgetExceeded = () => Date.now() - started >= budgetMs;
   const store = getStore();
+  if (skipForm) {
+    return emptyBundle("Form skipped (fast path); live fixtures only", emptyCoverage({
+      teamsRequested: teamIds.length,
+    }));
+  }
   const kv = await getHistoricKv();
 
   const byTeamId = new Map<string, TeamMatchSample[]>();
@@ -656,8 +667,8 @@ export async function loadHistoricForTeams(
     needDeepen.add(id);
   }
 
-  // 2) KV for teams still needing deepen (or missing solid cache)
-  const needKv = [...needDeepen];
+  // 2) KV for teams still needing deepen (or missing solid cache) — capped
+  const needKv = [...needDeepen].slice(0, Math.max(0, maxKvReads));
   if (kv && needKv.length) {
     await mapPool(needKv, Math.min(concurrency, needKv.length), async (id) => {
       const payload = await readTeamFromKv(kv, id);

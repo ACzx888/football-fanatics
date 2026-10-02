@@ -9,9 +9,10 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 /**
- * Fast board payload. Historic + ext form are memory/KV-first with a tiny
- * network fill. Prediction record/settle is fire-and-forget so we never 1102.
- * Optional: ?light=1 skips HKJC historic network entirely.
+ * Fast board payload for Free Workers.
+ * - default: live + tiny memory/KV form (no HKJC historic network)
+ * - ?light=1: live fixtures only (no form / overlay) — never 1102
+ * Heavy form deepen: /api/warm-ext (cron). Prediction settle: background.
  */
 export async function GET(req: Request) {
   const url = new URL(req.url);
@@ -19,17 +20,15 @@ export async function GET(req: Request) {
     url.searchParams.get("light") === "1" ||
     url.searchParams.get("light") === "true";
 
-  const payload = await fetchMatchesPayload({ light });
+  const payload = await fetchMatchesPayload({ light, form: !light });
 
-  // Forecast lock overlay (KV reads only) — keep on the critical path so the
-  // board shows locked numbers. Cap failures so matches always return.
-  if (payload.source === "live" && payload.matches.length > 0) {
+  if (!light && payload.source === "live" && payload.matches.length > 0) {
     try {
+      // Cap overlay work: forecast lock when KV snapshots exist
       await overlayLockedPredictions(payload.matches);
     } catch {
       // ignore
     }
-    // Record + settle off the critical path (waitUntil when available)
     sideEffectRecordAndSettleBackground(payload.matches);
   }
 
