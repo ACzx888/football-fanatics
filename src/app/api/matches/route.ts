@@ -1,22 +1,36 @@
 import { NextResponse } from "next/server";
 import { fetchMatchesPayload } from "@/lib/hkjc";
-import { sideEffectRecordAndSettle } from "@/lib/prediction-log";
+import {
+  overlayLockedPredictions,
+  sideEffectRecordAndSettleBackground,
+} from "@/lib/prediction-log";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-export async function GET() {
-  const payload = await fetchMatchesPayload();
+/**
+ * Fast board payload. Historic + ext form are memory/KV-first with a tiny
+ * network fill. Prediction record/settle is fire-and-forget so we never 1102.
+ * Optional: ?light=1 skips HKJC historic network entirely.
+ */
+export async function GET(req: Request) {
+  const url = new URL(req.url);
+  const light =
+    url.searchParams.get("light") === "1" ||
+    url.searchParams.get("light") === "true";
 
-  // Persist predictions as a non-blocking side effect (live only; never fail matches)
+  const payload = await fetchMatchesPayload({ light });
+
+  // Forecast lock overlay (KV reads only) — keep on the critical path so the
+  // board shows locked numbers. Cap failures so matches always return.
   if (payload.source === "live" && payload.matches.length > 0) {
     try {
-      // Await briefly so Workers don't kill the async task immediately;
-      // still swallow all errors so /api/matches stays resilient.
-      await sideEffectRecordAndSettle(payload.matches);
+      await overlayLockedPredictions(payload.matches);
     } catch {
-      // ignore KV / settlement failures
+      // ignore
     }
+    // Record + settle off the critical path (waitUntil when available)
+    sideEffectRecordAndSettleBackground(payload.matches);
   }
 
   return NextResponse.json(payload, {

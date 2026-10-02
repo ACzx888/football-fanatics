@@ -73,11 +73,18 @@ const WINDOW_DAYS = 14;
 const NUM_WINDOWS = 6; // ~84d lookback (6 × 14)
 const MAX_PER_WINDOW = 40;
 const PAGE = 20;
-const CONCURRENCY = 8;
+/** Default concurrency for request-path historic network (Free Worker safe). */
+const CONCURRENCY = 2;
 const MAX_SAMPLES_PER_TEAM = 12;
-/** Soft budget for /api/matches historic enrichment on Workers (~30s OpenNext). */
-export const HISTORIC_BUDGET_MS = 20_000;
-const PER_REQUEST_TIMEOUT_MS = 4_000;
+/**
+ * Soft wall budget for /api/matches historic enrichment.
+ * Free Workers 1102 on long multi-window + KV JSON work — keep this low.
+ * Heavy deepen belongs on /api/warm-ext or cron, not the board request.
+ */
+export const HISTORIC_BUDGET_MS = 4_000;
+/** Max teams that may hit HKJC network on the request path. */
+export const HISTORIC_MAX_NETWORK_TEAMS = 4;
+const PER_REQUEST_TIMEOUT_MS = 3_000;
 /** ≥2 samples: keep longer so warm KV hits skip network. */
 const KV_TTL_COMPLETE_SECONDS = 36 * 60 * 60; // 36h
 /** 0–1 samples: short TTL so next request retries deeper windows. */
@@ -579,6 +586,16 @@ export async function loadHistoricForTeams(
     budgetMs?: number;
     priorityIds?: string[];
     matchPairs?: Array<[string, string]>;
+    /** Skip HKJC network entirely — memory + KV only (fast request path). */
+    skipNetwork?: boolean;
+    /** Cap how many teams may hit network this request. */
+    maxNetworkTeams?: number;
+    /** Pool concurrency for network fetches (default 2). */
+    concurrency?: number;
+    /** Only network-fetch teams with 0 samples (default true on cheap path). */
+    onlyZeroSample?: boolean;
+    /** Skip deepen passes 2/3 (older windows). Default true when maxNetworkTeams set. */
+    skipDeepen?: boolean;
   }
 ): Promise<HistoricBundle> {
   const unique = new Map<string, string>();
@@ -592,6 +609,14 @@ export async function loadHistoricForTeams(
   }
 
   const budgetMs = opts?.budgetMs ?? HISTORIC_BUDGET_MS;
+  const maxNetworkTeams =
+    opts?.maxNetworkTeams ?? HISTORIC_MAX_NETWORK_TEAMS;
+  const concurrency = Math.max(1, opts?.concurrency ?? CONCURRENCY);
+  const onlyZeroSample = opts?.onlyZeroSample !== false;
+  const skipNetwork = opts?.skipNetwork === true;
+  const skipDeepen =
+    opts?.skipDeepen === true ||
+    (opts?.skipDeepen !== false && maxNetworkTeams <= HISTORIC_MAX_NETWORK_TEAMS);
   const started = Date.now();
   const budgetExceeded = () => Date.now() - started >= budgetMs;
   const store = getStore();
@@ -634,7 +659,7 @@ export async function loadHistoricForTeams(
   // 2) KV for teams still needing deepen (or missing solid cache)
   const needKv = [...needDeepen];
   if (kv && needKv.length) {
-    await mapPool(needKv, Math.min(8, needKv.length), async (id) => {
+    await mapPool(needKv, Math.min(concurrency, needKv.length), async (id) => {
       const payload = await readTeamFromKv(kv, id);
       if (!payload) return;
       const samples = payload.samples;
@@ -678,8 +703,9 @@ export async function loadHistoricForTeams(
     }
   }
 
-  const toFetch = [...needDeepen]
+  let toFetch = [...needDeepen]
     .filter((id) => sampleCount(id) < FAT_SAMPLE_SKIP)
+    .filter((id) => (onlyZeroSample ? sampleCount(id) === 0 : true))
     .sort((a, b) => {
       const sa = sampleCount(a);
       const sb = sampleCount(b);
@@ -690,6 +716,18 @@ export async function loadHistoricForTeams(
       if (ba !== bb) return bb - ba;
       return 0;
     });
+  // Prefer memory+KV when coverage is already usable — skip network to avoid 1102
+  const solidFromCache = teamIds.filter((id) => sampleCount(id) >= 2).length;
+  const anyFromCache = teamIds.filter((id) => sampleCount(id) >= 1).length;
+  const kvEnough =
+    teamIds.length > 0 &&
+    (solidFromCache >= Math.min(8, Math.ceil(teamIds.length * 0.35)) ||
+      anyFromCache >= Math.min(12, Math.ceil(teamIds.length * 0.5)));
+  if (skipNetwork || kvEnough) {
+    toFetch = [];
+  } else if (maxNetworkTeams >= 0) {
+    toFetch = toFetch.slice(0, maxNetworkTeams);
+  }
 
   async function persistTeam(
     id: string,
@@ -734,14 +772,14 @@ export async function loadHistoricForTeams(
   }
 
   if (toFetch.length && !budgetExceeded()) {
-    await mapPool(toFetch, CONCURRENCY, fetchRecent, budgetExceeded);
+    await mapPool(toFetch, concurrency, fetchRecent, budgetExceeded);
   }
 
   /**
-   * Pass 2 — deepen teams still below 2 samples using older windows (28–84d).
-   * Prefer pair-boosted thin sides so match pairs unlock HAD together.
+   * Pass 2/3 (older windows) are expensive — only for warm/cron paths that
+   * explicitly opt in (skipDeepen=false). Request path stays memory+KV+tiny fill.
    */
-  if (!budgetExceeded()) {
+  if (!skipDeepen && !skipNetwork && !budgetExceeded()) {
     const needOlder = teamIds
       .filter((id) => sampleCount(id) < 2)
       .sort((a, b) => {
@@ -750,11 +788,12 @@ export async function loadHistoricForTeams(
         // Finish 1-sample teams before pure empties (empties likely hopeless)
         if (sa !== sb) return sb - sa;
         return (pairBoost.get(b) || 0) - (pairBoost.get(a) || 0);
-      });
+      })
+      .slice(0, Math.max(0, maxNetworkTeams));
     if (needOlder.length) {
       await mapPool(
         needOlder,
-        CONCURRENCY,
+        concurrency,
         async (id) => {
           if (budgetExceeded()) return;
           const seed = byTeamId.get(id) || [];
@@ -782,18 +821,15 @@ export async function loadHistoricForTeams(
     }
   }
 
-  /**
-   * Pass 3 — if budget remains, try older windows for still-empty teams
-   * (clubs that simply did not play in the last ~28d but have 30–60d history).
-   */
-  if (!budgetExceeded()) {
+  if (!skipDeepen && !skipNetwork && !budgetExceeded()) {
     const stillEmpty = teamIds
       .filter((id) => sampleCount(id) === 0)
-      .sort((a, b) => (pairBoost.get(b) || 0) - (pairBoost.get(a) || 0));
+      .sort((a, b) => (pairBoost.get(b) || 0) - (pairBoost.get(a) || 0))
+      .slice(0, Math.max(0, maxNetworkTeams));
     if (stillEmpty.length) {
       await mapPool(
         stillEmpty,
-        CONCURRENCY,
+        concurrency,
         async (id) => {
           if (budgetExceeded()) return;
           try {
@@ -855,16 +891,22 @@ export async function loadHistoricForTeams(
   };
 
   let note: string;
+  const modeTag = skipNetwork
+    ? " · kv-only"
+    : kvEnough
+      ? " · kv-enough(skip-net)"
+      : "";
   if (teamsWithForm > 0) {
     note = `Team historic: ${teamsWithForm}/${teamIds.length} teams with form (≥2: ${teamsWithAtLeast2}) · ~${lookbackDays}d (${NUM_WINDOWS}×${WINDOW_DAYS}d) · kv ${teamsFromKv} · fetched ${teamsFetched}${
       timedOut ? " · partial (budget)" : ""
-    }`;
+    }${modeTag}`;
   } else if (timedOut) {
     note =
       "Historic team fetch timed out before samples; live matches still shown";
   } else {
     note =
-      "Historic HKJC returned no team samples; predictions need form samples";
+      "Historic HKJC returned no team samples; predictions need form samples" +
+      modeTag;
   }
 
   return {

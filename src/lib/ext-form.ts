@@ -608,9 +608,9 @@ async function loadKvIndex(
 export async function enrichHistoricWithExternal(
   bundle: HistoricBundle,
   teams: ExtTeamRef[],
-  _opts?: { budgetMs?: number }
+  opts?: { budgetMs?: number; maxLeagues?: number }
 ): Promise<{ bundle: HistoricBundle; stats: ExtEnrichStats }> {
-  void _opts;
+  const maxLeaguesOpt = opts?.maxLeagues;
   const env = await getEnv();
   const kv = env?.HISTORIC_CACHE;
   const stats: ExtEnrichStats = {
@@ -660,8 +660,10 @@ export async function enrichHistoricWithExternal(
 
   const mergedIndex: TeamIndex = new Map();
   let loaded = 0;
+  // Cap KV JSON parses hard — Free Worker 1102 from large league indexes
+  const maxLeagues = Math.max(0, maxLeaguesOpt ?? 3);
   for (const lid of ordered) {
-    if (loaded >= 6) break;
+    if (loaded >= maxLeagues) break;
     const idx = await loadKvIndex(kv, `${EXT_PREFIX}fotmob:idx:${lid}`);
     if (!idx.size) continue;
     loaded++;

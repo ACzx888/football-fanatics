@@ -151,11 +151,25 @@ function collectTeamRefs(
   return order.map((id) => map.get(id)!);
 }
 
+export type FetchMatchesOptions = {
+  /**
+   * Light mode: memory+KV historic only (no HKJC network form fills).
+   * Prefer for homepage / ?light=1 so fixtures never 1102.
+   */
+  light?: boolean;
+};
+
 /**
  * Fetch live HKJC matches via Workers-safe native GraphQL, then enrich with
  * team-targeted historic form (KV-cached) + external public form sources.
+ *
+ * Request path is deliberately cheap (Free Worker CPU): low historic budget,
+ * cap network teams, KV-only external merge. Heavy deepen → /api/warm-ext.
  */
-export async function fetchMatchesPayload(): Promise<MatchesApiResponse> {
+export async function fetchMatchesPayload(
+  opts?: FetchMatchesOptions
+): Promise<MatchesApiResponse> {
+  const light = opts?.light === true;
   const now = new Date();
   const today = formatHktDate(now);
   const tomorrow = addDaysHkt(now, 1);
@@ -180,25 +194,31 @@ export async function fetchMatchesPayload(): Promise<MatchesApiResponse> {
   let extSources: string[] = [];
   if (teamRefs.length > 0) {
     try {
-      // Soften HKJC budget slightly so external enricher gets wall time
+      // Cheap request path: prefer memory+KV; tiny 0-sample fill only when not light
       historic = await loadHistoricForTeams(teamRefs as TeamRef[], {
         matchPairs,
-        budgetMs: 10_000,
+        budgetMs: light ? 1_500 : 4_000,
+        skipNetwork: light,
+        maxNetworkTeams: light ? 0 : 4,
+        concurrency: 2,
+        onlyZeroSample: true,
+        skipDeepen: true,
       });
     } catch {
       historic = null;
     }
     if (historic) {
       try {
-        // Cheap KV-only merge (exact name first; fuzzy capped)
+        // Cheap KV-only merge (exact name first; fuzzy capped) — never parse dumps
         const enriched = await enrichHistoricWithExternal(historic, teamRefs, {
-          budgetMs: 3_000,
+          budgetMs: light ? 1_500 : 2_500,
+          maxLeagues: light ? 2 : 3,
         });
         historic = enriched.bundle;
         extEnriched = enriched.stats.teamsEnriched;
         extSources = enriched.stats.sourcesUsed;
       } catch {
-        // keep HKJC-only historic
+        // keep HKJC-only historic — fixtures still returned
       }
     }
   }

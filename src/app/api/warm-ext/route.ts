@@ -10,12 +10,17 @@ export const dynamic = "force-dynamic";
 
 /**
  * Warm external form indexes into HISTORIC_CACHE (one step per call).
+ * Cron / manual: keep this warm so /api/matches stays KV-only and never 1102.
+ *
  * Query:
  *   ?source=fotmob&id=9821
  *   ?source=fotmob&next=1     (next unwarmed from allow-list — client loops)
  *   ?source=csv&div=E0
  *   ?source=openliga
- *   ?source=all-small         (warm up to 3 small fotmob + E0 csv this call)
+ *   ?source=all-small         (warm up to 2 small fotmob + E0 csv this call)
+ *
+ * Tip: schedule `GET /api/warm-ext?source=all-small&offset=0` every few hours
+ * (bump offset) so board requests only merge KV — no FotMob/CSV parses inline.
  */
 export async function GET(req: Request) {
   const url = new URL(req.url);

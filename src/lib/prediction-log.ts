@@ -13,6 +13,10 @@ const INDEX_KEY = "pred-index";
 const KEY_PREFIX = "pred:";
 const MAX_INDEX = 400;
 const SETTLE_BATCH = 8;
+/** Cap how many matches we KV-write on the board request background task. */
+const RECORD_BATCH = 12;
+/** Cap live-settle enrichments on the board background task. */
+const LIVE_SETTLE_BATCH = 3;
 /** Corner expected vs actual absolute tolerance for "close enough". */
 const CORNER_TOLERANCE = 1.5;
 /** Team goals expected vs actual absolute tolerance for "close enough". */
@@ -258,7 +262,8 @@ function fromMatch(
  * First write wins: never overwrite had / corner forecasts / recordedAt once stored.
  */
 export async function recordLivePredictions(
-  matches: FootballMatch[]
+  matches: FootballMatch[],
+  opts?: { limit?: number }
 ): Promise<number> {
   const kv = await getKv();
   if (!kv) return 0;
@@ -266,8 +271,12 @@ export async function recordLivePredictions(
   let written = 0;
   const index = await readIndex(kv);
   const indexSet = new Set(index);
+  const limit = opts?.limit ?? matches.length;
+  let considered = 0;
 
   for (const m of matches) {
+    if (considered >= limit) break;
+    considered++;
     try {
       const hasHad = m.predictions.had.available;
       const hasCorner =
@@ -489,12 +498,15 @@ function needsSettlement(rec: PredictionRecord, now = Date.now()): boolean {
 
 /** Apply scores from live match payload when FT is already known. */
 export async function settleFromLiveMatches(
-  matches: FootballMatch[]
+  matches: FootballMatch[],
+  opts?: { limit?: number }
 ): Promise<number> {
   const kv = await getKv();
   if (!kv) return 0;
   let n = 0;
+  const limit = opts?.limit ?? matches.length;
   for (const m of matches) {
+    if (n >= limit) break;
     if (!isEndedStatus(String(m.status))) continue;
     if (
       m.live?.homeScore == null ||
@@ -857,15 +869,10 @@ export async function overlayLockedPredictions(
   return n;
 }
 
-/** Used by matches API — ignore failures. */
+/** Used by matches API — ignore failures. Overlay first for forecast lock. */
 export async function sideEffectRecordAndSettle(
   matches: FootballMatch[]
 ): Promise<void> {
-  try {
-    await recordLivePredictions(matches);
-  } catch {
-    // never fail matches
-  }
   try {
     // Serve the same locked numbers as History on the match board.
     await overlayLockedPredictions(matches);
@@ -873,10 +880,66 @@ export async function sideEffectRecordAndSettle(
     // ignore
   }
   try {
-    await settleFromLiveMatches(matches);
+    await recordLivePredictions(matches, { limit: RECORD_BATCH });
+  } catch {
+    // never fail matches
+  }
+  try {
+    await settleFromLiveMatches(matches, { limit: LIVE_SETTLE_BATCH });
   } catch {
     // ignore
   }
+}
+
+async function getWaitUntil(): Promise<((p: Promise<unknown>) => void) | null> {
+  try {
+    const cf = await getCloudflareContext({ async: true });
+    const exec = (
+      cf as { ctx?: { waitUntil?: (p: Promise<unknown>) => void } } | null
+    )?.ctx;
+    if (exec && typeof exec.waitUntil === "function") {
+      return (p: Promise<unknown>) => {
+        exec.waitUntil!(p);
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fire-and-forget record + tiny settle for /api/matches.
+ * Overlay is done on the critical path by the route; this only persists.
+ * Uses ctx.waitUntil when available so Workers keep the task alive briefly.
+ */
+export function sideEffectRecordAndSettleBackground(
+  matches: FootballMatch[]
+): void {
+  const task = (async () => {
+    try {
+      await recordLivePredictions(matches, { limit: RECORD_BATCH });
+    } catch {
+      // never fail matches
+    }
+    try {
+      await settleFromLiveMatches(matches, { limit: LIVE_SETTLE_BATCH });
+    } catch {
+      // ignore
+    }
+  })();
+
+  void getWaitUntil().then((waitUntil) => {
+    if (waitUntil) {
+      try {
+        waitUntil(task);
+      } catch {
+        // ignore
+      }
+    }
+  });
+  // Also keep a detached reference so local/dev still runs the task
+  void task;
 }
 
 export function formatHktTodayForLog(): string {

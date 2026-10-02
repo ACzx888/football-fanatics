@@ -106,7 +106,7 @@ Local: copy `.dev.vars.example` → `.dev.vars` and fill values. Bindings are de
 ## Limitations
 
 - HKJC `startDate`/`endDate` on *live* matches often error; filtering is done locally by kickoff HKT date.
-- Historic + external enrich share a Workers time budget; cold requests may be partial (warm KV improves coverage).
+- `/api/matches` is Free-Worker cheap: memory+KV form first, ≤4 zero-sample HKJC fills, KV-only external merge (no inline FotMob/CSV parses). Cold form may be thin — warm via `/api/warm-ext` (cron) for coverage. `?light=1` skips historic network entirely. Homepage SSR uses light mode so fixtures never 1102.
 - Match minute is estimated from kickoff + status; HKJC payloads here do not expose an official clock.
 - Obscure cups / AM / friendlies may still be unmatched after fuzzy aliasing — we stay honest with **Insufficient Data**.
 - CSV / FotMob unofficial JSON can change shape; enricher degrades gracefully per source.
