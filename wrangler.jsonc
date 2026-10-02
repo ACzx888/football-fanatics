@@ -1,7 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "football-fanatics",
-  "main": ".open-next/worker.js",
+  "main": "custom-worker.ts",
   "compatibility_date": "2026-09-21",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "assets": {
@@ -17,5 +17,10 @@
       "id": "0b9d4b44d2c245e8a930835404f9d0bd",
       "preview_id": "25bd62136e5f4620854a499276af01b7"
     }
-  ]
+  ],
+  // HKT 06:00 / 12:00 / 18:00 → UTC 22:00 / 04:00 / 10:00
+  // Each fire: warm-ext all-small chunk + one CSV (see custom-worker.ts)
+  "triggers": {
+    "crons": ["0 22 * * *", "0 4 * * *", "0 10 * * *"]
+  }
 }

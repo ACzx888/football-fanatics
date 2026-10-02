@@ -1,11 +1,24 @@
 import { MatchBoard } from "@/components/MatchBoard";
+import { readBoardCache, mergeLiveOverlay } from "@/lib/board-cache";
 import { fetchMatchesPayload } from "@/lib/hkjc";
 
 export const dynamic = "force-dynamic";
 
 export default async function HomePage() {
-  // SSR uses light (KV-only form) so Free Workers never 1102 on the homepage.
-  // Client refresh hits /api/matches which may do a tiny 0-sample network fill.
-  const initial = await fetchMatchesPayload({ light: true });
+  // Prefer KV board (predictions included) so Free Workers never 1102 on SSR.
+  // Miss → light fixtures only; client refresh loads /api/matches (cache fill).
+  let initial = null as Awaited<ReturnType<typeof fetchMatchesPayload>> | null;
+  try {
+    const hit = await readBoardCache();
+    if (hit) {
+      const merged = await mergeLiveOverlay(hit.payload);
+      initial = merged.payload;
+    }
+  } catch {
+    initial = null;
+  }
+  if (!initial) {
+    initial = await fetchMatchesPayload({ light: true });
+  }
   return <MatchBoard initial={initial} />;
 }

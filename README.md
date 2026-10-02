@@ -92,6 +92,42 @@ npm run preview
 
 Analysis is for entertainment only — **not betting advice**.
 
+
+## Caching & update frequency
+
+| Layer | What | Frequency / TTL |
+| --- | --- | --- |
+| **Board KV** `board:v1:today-tomorrow` | Fixtures + locked pre-match predictions | **~3 hours** (not every page load) |
+| **Live overlay** | Score / minute / status from HKJC GraphQL | Merged on each `/api/matches` (cheap); client poll **~45s** only when in-play |
+| **warm-ext** | Public form indexes (FotMob / CSV / OpenLiga) | **A few times per day** via Worker cron |
+| **HTTP** | `Cache-Control` | `max-age=300` pre-event / `max-age=30` in-play; headers `X-Board-Cache`, `X-Board-Cache-TTL`, `X-Board-Live-Overlay` |
+
+### Cloudflare cron (Worker `scheduled`)
+
+Configured in `wrangler.jsonc` → `triggers.crons` and handled by `custom-worker.ts`:
+
+| UTC cron | HKT |
+| --- | --- |
+| `0 22 * * *` | 06:00 |
+| `0 4 * * *` | 12:00 |
+| `0 10 * * *` | 18:00 |
+
+Each run hits `/api/warm-ext?source=all-small&offset=…` (2 small FotMob leagues + E0 CSV) and one rotating CSV div; midday also warms OpenLiga. Offset stored in KV `warm:v1:cron-offset`. Successful warm **invalidates** the board cache so the next board request rebuilds with fresher form.
+
+Docs: `GET /api/warm-ext?source=status`
+
+### External scheduler (fallback)
+
+If cron is unavailable, schedule these a few times/day:
+
+```bash
+curl -sS "https://football-fanatics.zx888s.workers.dev/api/warm-ext?source=all-small&offset=0"
+curl -sS "https://football-fanatics.zx888s.workers.dev/api/warm-ext?source=all-small&offset=2"
+curl -sS "https://football-fanatics.zx888s.workers.dev/api/warm-ext?source=csv&div=E0"
+```
+
+Bypass board cache once: `GET /api/matches?refresh=1`
+
 ## Optional API secrets (max coverage)
 
 Keyless sources ship by default. For broader club coverage / real corner stats:
@@ -106,7 +142,7 @@ Local: copy `.dev.vars.example` → `.dev.vars` and fill values. Bindings are de
 ## Limitations
 
 - HKJC `startDate`/`endDate` on *live* matches often error; filtering is done locally by kickoff HKT date.
-- `/api/matches` is Free-Worker cheap: live fixtures + capped per-team `teamform` KV (max 10 reads); **no** HKJC multi-window historic and **no** inline extform league-index JSON parses (those caused Error 1102). Homepage SSR uses light mode (fixtures only); client refresh loads default for thin KV form. Coverage tradeoff: form may be partial until `/api/warm-ext` (cron) fills caches. `?light=1` skips form/overlay entirely.
+- `/api/matches` is Free-Worker cheap (**KV-first**): serves `board:v1:today-tomorrow` (TTL ~3h) with a light live GraphQL overlay for score/minute; **no** HKJC multi-window historic and **no** inline extform league-index JSON parses on the hot path (those caused Error 1102). Homepage SSR prefers board KV; miss falls back to light fixtures. Client polls ~5 min pre-event / ~45s in-play. Coverage tradeoff: form may be partial until `/api/warm-ext` (cron, a few×/day) fills caches. `?light=1` on miss skips form; `?refresh=1` bypasses board KV.
 - Match minute is estimated from kickoff + status; HKJC payloads here do not expose an official clock.
 - Obscure cups / AM / friendlies may still be unmatched after fuzzy aliasing — we stay honest with **Insufficient Data**.
 - CSV / FotMob unofficial JSON can change shape; enricher degrades gracefully per source.

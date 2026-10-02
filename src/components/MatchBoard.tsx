@@ -7,7 +7,10 @@ import { ErrorBanner } from "./ErrorBanner";
 import { Header } from "./Header";
 import { MatchCard } from "./MatchCard";
 
-const REFRESH_MS = 45_000;
+/** In-play score/minute only — short poll. */
+const REFRESH_INPLAY_MS = 45_000;
+/** Pre-event board is KV-cached for hours; poll lightly. */
+const REFRESH_PRE_EVENT_MS = 5 * 60_000;
 
 type Filter = "all" | "today" | "tomorrow" | "inplay";
 
@@ -38,7 +41,7 @@ export function MatchBoard({ initial }: { initial: MatchesApiResponse }) {
   );
 
   useEffect(() => {
-    const ms = hasInPlay ? REFRESH_MS : 90_000;
+    const ms = hasInPlay ? REFRESH_INPLAY_MS : REFRESH_PRE_EVENT_MS;
     const id = setInterval(() => {
       void refresh();
     }, ms);
@@ -137,8 +140,10 @@ export function MatchBoard({ initial }: { initial: MatchesApiResponse }) {
         <footer className="mt-10 space-y-3 border-t border-slate-800 pt-6">
           <Disclaimer />
           <p className="text-center text-[11px] text-slate-600">
-            Auto-refresh every {hasInPlay ? "45s" : "90s"}
-            {hasInPlay ? " (in-play matches detected)" : ""}. Minute clock is
+            Auto-refresh every {hasInPlay ? "45s" : "5 min"}
+            {hasInPlay
+              ? " (in-play scores/minutes)"
+              : " (pre-event board KV-cached ~3h; warm-ext a few×/day)"}. Minute clock is
             estimated from kickoff + status when HKJC does not expose match
             minute.
           </p>
