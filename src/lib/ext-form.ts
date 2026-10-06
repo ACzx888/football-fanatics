@@ -3,7 +3,7 @@
  *
  * Free Workers cannot JSON-parse multiple large FotMob dumps inside /api/matches
  * (CPU 1102). Architecture:
- *  - /api/warm-ext populates KV `extform:v2:fotmob:league:{id}` / CSV indexes
+ *  - /api/warm-ext populates KV `extform:v2:fotmob:idx:{id}` / CSV / openliga indexes
  *  - enrichHistoricWithExternal only READs KV + merges into HistoricBundle
  *
  * Sources: fotmob (warmed), football-data.co.uk CSV (warmed), openligadb (warmed).
@@ -87,7 +87,9 @@ const FOTMOB_LEAGUE_MAP: Record<string, number[]> = {
   ULP: [11027, 538],
   INT: [114],
   GULF: [329],
+  GUC: [329],
   "concacaf nations league": [9821],
+  "gulf cup": [329],
   "u21 euro qualifiers": [10437, 288],
   "women ue champions": [9375],
   "women europa cup": [11129],
@@ -101,7 +103,6 @@ const FOTMOB_LEAGUE_MAP: Record<string, number[]> = {
   "chilean cup": [9091],
   "uae league cup": [11027],
   "international matches": [114],
-  "gulf cup": [329],
 };
 
 /** Warm-friendly leagues (size-checked at fetch). */
@@ -127,12 +128,18 @@ export const WARM_FOTMOB_LEAGUES: Array<{ id: number; label: string }> = [
 
 const FD_CSV_DIVS = ["E0", "E1", "SP1", "D1", "I1", "F1"];
 
-function seasonPath(): string {
+function seasonPath(offsetYears = 0): string {
   const now = new Date();
   const y = now.getUTCFullYear();
   const m = now.getUTCMonth() + 1;
-  const start = m >= 8 ? y : y - 1;
+  const start = (m >= 8 ? y : y - 1) - offsetYears;
   return `${String(start).slice(2)}${String(start + 1).slice(2)}`;
+}
+
+function seasonCandidates(): string[] {
+  const a = seasonPath(0);
+  const b = seasonPath(1);
+  return a === b ? [a] : [a, b];
 }
 
 async function getEnv(): Promise<ExtEnv | null> {
@@ -497,17 +504,30 @@ export async function warmFotmobLeague(
 /** Warm one football-data.co.uk CSV division into KV. */
 export async function warmFdCsvDiv(
   div: string
-): Promise<{ ok: boolean; teams: number; bytes: number }> {
+): Promise<{ ok: boolean; teams: number; bytes: number; season?: string }> {
   const env = await getEnv();
   const kv = env?.HISTORIC_CACHE;
-  const season = seasonPath();
-  const key = `${EXT_PREFIX}fdcsv:${season}:${div}`;
-  const url = `https://www.football-data.co.uk/mmz4281/${season}/${div}.csv`;
-  const text = await fetchText(url, { timeoutMs: 12_000 });
-  if (!text || text.length < 50) return { ok: false, teams: 0, bytes: 0 };
-  const index = parseFdCsv(text, div);
-  await kvPut(kv, key, JSON.stringify(indexToObject(index)), KV_TTL_CSV);
-  return { ok: true, teams: index.size, bytes: text.length };
+  for (const season of seasonCandidates()) {
+    const key = `${EXT_PREFIX}fdcsv:${season}:${div}`;
+    const url = `https://www.football-data.co.uk/mmz4281/${season}/${div}.csv`;
+    const body = await fetchText(url, { timeoutMs: 12_000 });
+    if (!body || body.length < 50 || !body.includes("HomeTeam")) continue;
+    const index = parseFdCsv(body, div);
+    if (!index.size) continue;
+    await kvPut(kv, key, JSON.stringify(indexToObject(index)), KV_TTL_CSV);
+    // Also mirror under current season key so enrich seasonPath(0) finds it
+    const current = seasonPath(0);
+    if (season !== current) {
+      await kvPut(
+        kv,
+        `${EXT_PREFIX}fdcsv:${current}:${div}`,
+        JSON.stringify(indexToObject(index)),
+        KV_TTL_CSV
+      );
+    }
+    return { ok: true, teams: index.size, bytes: body.length, season };
+  }
+  return { ok: false, teams: 0, bytes: 0 };
 }
 
 export async function warmOpenLiga(): Promise<{ ok: boolean; teams: number }> {
@@ -649,19 +669,22 @@ export async function enrichHistoricWithExternal(
     .sort((a, b) => b[1] - a[1])
     .map(([id]) => id);
   // Prefer likely-warmed small leagues even if lower demand count
-  const preferred = [9821, 9375, 11129, 9717, 114, 10608, 9833, 11027, 329, 9091, 10342, 288, 9227, 10437, 161, 8972, 130];
-  // Highest demand first among preferred (so USL/U21 beat low-count cups)
+  const preferred = [9821, 288, 10437, 114, 10608, 9091, 130, 329, 9375, 11129, 9717, 9833, 11027, 10342, 9227, 161, 8972];
+  // Highest demand first among preferred (so U21/INT beat low-count cups)
   const ordered = [
     ...preferred
       .filter((id) => leagueIds.includes(id))
       .sort((a, b) => (demand.get(b) || 0) - (demand.get(a) || 0)),
     ...leagueIds.filter((id) => !preferred.includes(id)),
+    // Spare slots: any warmed preferred index (helps unmapped HKJC codes via name match)
+    ...preferred.filter((id) => !leagueIds.includes(id)),
   ];
 
   const mergedIndex: TeamIndex = new Map();
   let loaded = 0;
-  // Cap KV JSON parses hard — Free Worker 1102 from large league indexes
-  const maxLeagues = Math.max(0, maxLeaguesOpt ?? 3);
+  // Cap KV JSON parses — Free Worker 1102 from large league indexes.
+  // Board rebuild is rare (~3h cache / warm invalidate), so 4 is OK.
+  const maxLeagues = Math.max(0, maxLeaguesOpt ?? 4);
   for (const lid of ordered) {
     if (loaded >= maxLeagues) break;
     const idx = await loadKvIndex(kv, `${EXT_PREFIX}fotmob:idx:${lid}`);
@@ -675,16 +698,34 @@ export async function enrichHistoricWithExternal(
     }
   }
 
-  // At most 2 CSV divisions (corners for major EU clubs when names match)
-  const season = seasonPath();
-  for (const div of FD_CSV_DIVS.slice(0, 1)) {
-    const idx = await loadKvIndex(kv, `${EXT_PREFIX}fdcsv:${season}:${div}`);
-    if (!idx.size) continue;
-    stats.csvDivisions++;
-    sourcesUsed.add("football-data");
-    for (const [k, v] of idx) {
-      if (!mergedIndex.has(k)) mergedIndex.set(k, []);
-      mergedIndex.get(k)!.push(...v);
+  // CSV divisions (corners / PL-EFL club form when names match). Try current+prev season keys.
+  let csvLoaded = 0;
+  for (const season of seasonCandidates()) {
+    for (const div of FD_CSV_DIVS.slice(0, 2)) {
+      if (csvLoaded >= 2) break;
+      const idx = await loadKvIndex(kv, `${EXT_PREFIX}fdcsv:${season}:${div}`);
+      if (!idx.size) continue;
+      csvLoaded++;
+      stats.csvDivisions++;
+      sourcesUsed.add("football-data");
+      for (const [k, v] of idx) {
+        if (!mergedIndex.has(k)) mergedIndex.set(k, []);
+        mergedIndex.get(k)!.push(...v);
+      }
+    }
+    if (csvLoaded >= 2) break;
+  }
+
+  // OpenLiga BL1 when warmed (cheap small index)
+  {
+    const idx = await loadKvIndex(kv, `${EXT_PREFIX}openliga:bl1`);
+    if (idx.size) {
+      stats.openligadb++;
+      sourcesUsed.add("openligadb");
+      for (const [k, v] of idx) {
+        if (!mergedIndex.has(k)) mergedIndex.set(k, []);
+        mergedIndex.get(k)!.push(...v);
+      }
     }
   }
 
@@ -738,7 +779,9 @@ export async function enrichHistoricWithExternal(
   const srcNote =
     stats.sourcesUsed.length > 0
       ? ` · ext[${stats.sourcesUsed.join("+")}] +${stats.teamsEnriched}`
-      : " · ext[kv-miss: run /api/warm-ext]";
+      : stats.teamsEnriched > 0
+        ? ` · ext[+${stats.teamsEnriched}]`
+        : " · ext[kv-miss: run /api/warm-ext]";
   bundle.note = `${bundle.note || "Historic"}${srcNote}`;
 
   return { bundle, stats };

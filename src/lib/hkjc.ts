@@ -6,6 +6,7 @@ import {
   type TeamRef,
 } from "./historic";
 import {
+  enrichHistoricWithExternal,
   teamFormSources,
   type ExtTeamRef,
 } from "./ext-form";
@@ -215,13 +216,25 @@ export async function fetchMatchesPayload(
     } catch {
       historic = null;
     }
-    // Never merge large extform league indexes on the board path (CPU 1102).
-    // Per-team teamform KV + memory only. Warm indexes via /api/warm-ext.
-    if (historic?.note) {
-      historic.note = `${historic.note} · ext[board-skipped: run /api/warm-ext]`;
+    // KV-only ext form merge (indexes written by /api/warm-ext).
+    // Safe on board rebuild because board:v1 is cached ~3h and warm invalidates it —
+    // do NOT reintroduce large outbound JSON parses on this path.
+    if (historic) {
+      try {
+        const enriched = await enrichHistoricWithExternal(historic, teamRefs, {
+          budgetMs: 2_500,
+          maxLeagues: 4,
+        });
+        historic = enriched.bundle;
+        extEnriched = enriched.stats.teamsEnriched;
+        extSources = enriched.stats.sourcesUsed;
+      } catch {
+        // keep memory/KV historic — fixtures still returned
+        if (historic.note) {
+          historic.note = `${historic.note} · ext[merge-error]`;
+        }
+      }
     }
-    extSources = [];
-    extEnriched = 0;
   } else if (teamRefs.length > 0 && light) {
     historic = null; // fixtures with Insufficient Data
   }
