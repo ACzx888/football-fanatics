@@ -222,8 +222,8 @@ export async function fetchMatchesPayload(
     if (historic) {
       try {
         const enriched = await enrichHistoricWithExternal(historic, teamRefs, {
-          budgetMs: 2_500,
-          maxLeagues: 4,
+          budgetMs: 1_500,
+          maxLeagues: 1, // board-teams KV first; 1 league fallback only
         });
         historic = enriched.bundle;
         extEnriched = enriched.stats.teamsEnriched;

@@ -1,21 +1,16 @@
 /**
  * OpenNext custom Worker: re-export fetch + Cloudflare cron (scheduled).
- * Cron hits /api/warm-ext in small chunks a few times per day (HKT).
+ * Cron hits /api/warm-ext?source=board (builds board-teams index) a few times/day.
  *
  * Schedules (UTC) ≈ HKT 06:00 / 12:00 / 18:00:
  *   0 22 * * *  → 06:00 HKT
  *   0 4 * * *   → 12:00 HKT
  *   0 10 * * *  → 18:00 HKT
  */
-// Generated at `opennextjs-cloudflare build` time
 import { default as handler } from "./.open-next/worker.js";
 
 const WARM_BASE = "https://football-fanatics.zx888s.workers.dev";
-const WARM_OFFSET_KEY = "warm:v1:cron-offset";
 const WARM_CSV_OFFSET_KEY = "warm:v1:cron-csv-offset";
-const FOTMOB_CHUNK = 2;
-/** Small-league id list length used by /api/warm-ext?source=all-small */
-const FOTMOB_SMALL_LEN = 10;
 const CSV_DIVS = ["E0", "E1", "SP1", "D1", "I1", "F1"];
 
 type Kv = {
@@ -33,29 +28,23 @@ type WaitUntilCtx = {
 
 async function warmOnce(env: WorkerEnv): Promise<void> {
   const kv = env.HISTORIC_CACHE;
-  let offset = 0;
   let csvOffset = 0;
   try {
-    offset = Number((await kv.get(WARM_OFFSET_KEY)) || 0) || 0;
     csvOffset = Number((await kv.get(WARM_CSV_OFFSET_KEY)) || 0) || 0;
   } catch {
-    offset = 0;
     csvOffset = 0;
   }
 
-  const allSmallUrl = `${WARM_BASE}/api/warm-ext?source=all-small&offset=${offset}`;
   const csvDiv = CSV_DIVS[csvOffset % CSV_DIVS.length];
+  const boardUrl = `${WARM_BASE}/api/warm-ext?source=board`;
   const csvUrl = `${WARM_BASE}/api/warm-ext?source=csv&div=${csvDiv}`;
 
   const tasks: Promise<unknown>[] = [
-    fetch(allSmallUrl).then(async (r) => {
+    fetch(boardUrl).then(async (r) => {
       try {
-        const j = (await r.json()) as { nextOffset?: number };
-        const next = j.nextOffset ?? offset + FOTMOB_CHUNK;
-        const wrapped = next >= FOTMOB_SMALL_LEN ? 0 : next;
-        await kv.put(WARM_OFFSET_KEY, String(wrapped));
+        await r.text();
       } catch {
-        // ignore parse/kv
+        // ignore
       }
     }),
     fetch(csvUrl).then(async () => {
@@ -97,7 +86,6 @@ const worker = {
 
 export default worker;
 
-// Re-export OpenNext Durable Objects used by the adapter cache layer
 export {
   DOQueueHandler,
   DOShardedTagCache,

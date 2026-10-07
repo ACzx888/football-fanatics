@@ -90,7 +90,7 @@ const ALIASES: Record<string, string[]> = {
   "al dhafra": ["al-dhafra", "aldhafra"],
   "sharjah fc": ["sharjah", "al sharjah"],
   "hatta club": ["hatta", "hatta fc"],
-  "dubai united fc": ["dubai united", "dubai utd"],
+  "dubai united fc": ["dubai united", "dubai utd", "united fc dubai"],
   baniyas: ["baniyas sc", "baniyas club"],
   "new mexico utd": ["new mexico united", "nm united"],
   "sporting club jacksonville": [
@@ -110,6 +110,42 @@ const ALIASES: Record<string, string[]> = {
   "sacramento republic": ["sacramento republic fc", "sacramento"],
   "plaza colonia": ["plaza colonia", "club plaza colonia"],
   "defensor sporting": ["defensor", "defensor sporting club"],
+  "urawa reds": ["urawa red diamonds", "urawa"],
+  "fc yokohama": ["yokohama fc", "yokohama"],
+  "fagiano okayama": ["fagiano okayama fc"],
+  "rb omiya ardija": ["omiya ardija", "rb omiya"],
+  "athletic club mg": ["athletic club", "athletic mg", "athletic club (mg)"],
+  "clube do remo": ["remo", "remo pa", "clube do remo pa"],
+  "universidad chile": ["universidad de chile", "u de chile", "la u"],
+  "montevideo wanderers": ["wanderers", "montevideo wanderers fc"],
+  "inter turku": ["fc inter turku", "inter turku", "fc inter", "inter"],
+  "tampines rovers": ["tampines", "tampines rovers fc"],
+  "kuching city": ["kuching city fc", "kuching"],
+  "hjk helsinki": ["hjk", "hjk helsinki"],
+  "vps vaasa": ["vps", "vaasan palloseura"],
+  gnistan: ["if gnistan", "gnistan"],
+  "al duhail": ["al-duhail sc", "al duhail sc", "al-duhail", "duhail"],
+  "al shamal": ["al-shamal", "al shamal sc", "al-shamal sc"],
+  "shabab al ahli": [
+    "shabab al-ahli dubai fc",
+    "shabab al ahli dubai",
+    "shabab al-ahli",
+    "shabab al ahli dubai fc",
+  ],
+  "al wasl": ["al-wasl", "al wasl fc", "al-wasl dubai"],
+  "khor fakkan": ["khorfakkan", "khor fakkan fc", "khorfakkan club"],
+  gremio: ["gremio fbpa", "grêmio"],
+  "america mineiro": ["america-mg", "america mg", "america mineiro mg", "americamg"],
+  "atletico goianiense": ["atletico-go", "atletico go", "atletico goianiense go"],
+  fortaleza: ["fortaleza ec", "fortaleza ce"],
+  crb: ["crb alagoas", "clube de regatas brasil"],
+  "juventud las piedras": [
+    "juventud de las piedras",
+    "juventud",
+    "juventud lp",
+  ],
+  cerrito: ["club sportivo cerrito", "cs cerrito"],
+  benin: ["benin", "benin national team"],
 };
 
 export function stripDiacritics(s: string): string {
@@ -140,6 +176,10 @@ function tokens(name: string): string[] {
   return normalizeTeamName(name)
     .split(" ")
     .filter((t) => t && !STRIP_WORDS.has(t));
+}
+
+export function getTeamAliasKeys(name: string): string[] {
+  return aliasKeys(name);
 }
 
 function aliasKeys(name: string): string[] {
