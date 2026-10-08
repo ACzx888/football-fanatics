@@ -307,18 +307,34 @@ export type RawLiveMatch = {
 };
 
 /**
- * Fetch open football matches. Empty oddsTypes keeps foPools empty
- * (predictions stay odds-free) while satisfying the whitelist.
+ * Fetch open football matches for the board.
+ *
+ * HKJC's matchList filter is odds-type gated: `fbOddsTypes: []` returns
+ * HTTP 200 with an empty `matches` array (looks like "no fixtures"), while
+ * a seed type such as HAD returns the full open slate. We always request a
+ * seed type for listing, then strip `foPools` so odds never enter the app.
  */
+const MATCH_LIST_SEED_ODDS_TYPES = ["HAD"] as const;
+
+function stripOddsPools<T extends Record<string, unknown>>(raw: T): RawLiveMatch {
+  // Drop foPools / any odds payload before callers see the match.
+  const { foPools: _omit, ...rest } = raw as T & { foPools?: unknown };
+  void _omit;
+  return rest as RawLiveMatch;
+}
+
 export async function fetchLiveFootballMatches(
-  oddsTypes: string[] = [],
+  oddsTypes: string[] = [...MATCH_LIST_SEED_ODDS_TYPES],
   opts?: { signal?: AbortSignal; timeoutMs?: number }
 ): Promise<RawLiveMatch[]> {
-  const data = await hkjcGraphql<{ matches?: RawLiveMatch[] | null }>(
+  // Empty array is a silent zero-match trap on HKJC — never send it.
+  const types =
+    oddsTypes.length > 0 ? oddsTypes : [...MATCH_LIST_SEED_ODDS_TYPES];
+  const data = await hkjcGraphql<{ matches?: Array<Record<string, unknown>> | null }>(
     footballMatchesQuery,
     {
-      fbOddsTypes: oddsTypes,
-      fbOddsTypesM: oddsTypes,
+      fbOddsTypes: types,
+      fbOddsTypesM: types,
       startDate: null,
       endDate: null,
       tournIds: null,
@@ -333,7 +349,7 @@ export async function fetchLiveFootballMatches(
     },
     opts
   );
-  return data.matches ?? [];
+  return (data.matches ?? []).map((m) => stripOddsPools(m));
 }
 
 export type RawHistoricMatch = {
