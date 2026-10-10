@@ -4,6 +4,18 @@
 
 Dark, modern sports desk for Hong Kong Jockey Club (HKJC) football fixtures — today & tomorrow in `Asia/Hong_Kong` (UTC+8) — with **purely fundamental** predictions (no odds) and in-play tracking.
 
+## Sharp vs Soft (integrated)
+
+Odds board lives **inside this site** at [`/odds`](https://football-fanatics.zx888s.workers.dev/odds) (also `/odds/alerts`, `/odds/match/[id]`).
+
+- APIs: `/api/odds/board`, `/api/odds/collect`, `/api/odds/alerts`, `/api/odds/match/[id]`
+- KV: `ODDS_KV` (shared namespace with the former standalone app)
+- Cron: every **10 minutes** → `/api/odds/collect` (plus existing warm-ext crons)
+- Collect stays on **Workers Free**: full HKJC card on the board; deep HKJC+Pin only for a priority batch (in-play → kickoff soon → rotate PREEVENT via `svs:v1:pin-rotate-cursor`). Stale odds OK for low priority; UI shows `lastUpdated` / Pin stale.
+- Manual **Refresh** on `/odds` uses `?mode=lean` (tiny priority batch) so Workers Free stays under CPU 1102; cron keeps `mode=full` rotating the card
+- Optional: `?mode=lean|hkjc|pin|full` and `?pinLimit=1..10` on `/api/odds/collect`
+- Standalone `https://sharp-vs-soft.zx888s.workers.dev` **302-redirects** into `/odds`
+
 ## Features
 
 - **HKJC schedule** — live matches via native Workers-safe GraphQL fetch to HKJC. Date filters are unreliable upstream, so we fetch open matches and filter to today/tomorrow in HKT. Odds pools are **not** used for prediction (empty `fbOddsTypes`).
